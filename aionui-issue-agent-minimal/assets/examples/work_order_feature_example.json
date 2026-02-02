@@ -1,0 +1,14 @@
+{
+  "owner_repo": "iOfficeAI/AionUi",
+  "project_url": "https://github.com/iOfficeAI/AionUi",
+  "issue_type": "feature",
+  "title": "【Feature】示例标题（中文优先 / optional EN）",
+  "feature_description": "功能描述",
+  "problem_statement": "当前痛点/问题",
+  "proposed_solution": "建议方案",
+  "feature_category": "UI/UX",
+  "additional_context": "补充信息（可选）",
+  "attachments": [],
+  "issue_number": "",
+  "issue_url": ""
+}

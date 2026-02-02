@@ -1,0 +1,16 @@
+{
+  "owner_repo": "iOfficeAI/AionUi",
+  "project_url": "https://github.com/iOfficeAI/AionUi",
+  "issue_type": "bug",
+  "title": "【Bug】示例标题（中文优先 / optional EN）",
+  "platform": "Windows",
+  "version": "latest",
+  "bug_description": "简要描述问题",
+  "steps_to_reproduce": "1. ...\n2. ...\n3. ...",
+  "expected_behavior": "期望行为",
+  "actual_behavior": "实际行为（可选，默认同 bug_description）",
+  "additional_context": "补充信息（可选）",
+  "attachments": [],
+  "issue_number": "",
+  "issue_url": ""
+}

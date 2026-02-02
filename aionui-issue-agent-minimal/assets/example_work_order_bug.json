@@ -1,0 +1,21 @@
+{
+  "owner_repo": "iOfficeAI/AionUi",
+  "project_url": "https://github.com/iOfficeAI/AionUi",
+  "issue_type": "bug",
+  "title": "【Bug】发送按钮点击后卡死无响应 / [Bug] App freezes after clicking Send",
+  "platform": "Windows",
+  "version": "latest",
+  "bug_description": "在主界面点击“发送”后界面卡死，无 loading，也无法再次操作。",
+  "steps_to_reproduce": [
+    "1. 打开 App 进入主界面",
+    "2. 进入欢迎页/对话页",
+    "3. 点击“发送”按钮",
+    "4. 观察：界面卡顿无响应"
+  ],
+  "expected_behavior": "点击发送后应出现 loading 或 toast 提示；请求失败应提示错误且界面保持可操作。",
+  "actual_behavior": "在主界面点击“发送”后界面卡死，无 loading，也无法再次操作。",
+  "additional_context": "",
+  "attachments": [
+    "/abs/path/screenshot.png"
+  ]
+}
