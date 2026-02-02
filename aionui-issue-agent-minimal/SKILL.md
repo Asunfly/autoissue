@@ -1,6 +1,6 @@
 ---
 name: github-issue-autosubmit-aionui
-description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOfficeAI/AionUi。默认用 Python + Selenium 打开 GitHub、等待用户登录、选择模板、填表、可选上传附件、点击 Create。支持 macOS/Windows/Ubuntu；通过 work_order.json 传入变量；也可选择 Chrome DevTools MCP 流程（不依赖本脚本）。
+description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOfficeAI/AionUi。默认用 Python + Browser-use 打开 GitHub、等待用户登录、选择模板、填表、可选上传附件、点击 Create。支持 macOS/Windows/Ubuntu；通过 work_order.json 传入变量；也可选择 Chrome DevTools MCP 流程（不依赖本脚本）。
 ---
 
 # GitHub Issue AutoSubmit (AionUi Minimal, v19)
@@ -16,11 +16,11 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 参考 `README.md`。
 
 ## 运行策略
-- 默认：有界面模式，脚本会停在登录态判断处，等待用户手动登录。
+- 默认：有界面模式，Browser-use 会停在登录态判断处，等待用户手动登录。
 - 建议：加 `--user-data-dir` 复用登录态，减少反复登录。
 
 ## 注意
-- GitHub 页面 class 经常变化，脚本尽量使用 `aria-label`/`data-testid`/可见文本定位。
+- GitHub 页面 class 经常变化，Browser-use 依赖可见文本/语义定位与视觉能力。
 - 如页面结构变化，优先用 MCP 方式实时抓取元素 uid 来适配。
 
 
@@ -36,17 +36,17 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 - 也可在 `work_order.json` 增加 `platform` 明确指定（例如 `Windows` / `Linux` / `macOS (Apple Silicon)` / `macOS (Intel)`）。
 
 
-## 不阻塞填写 & 失败重试
+## 不阻塞填写 & 失败处理
 
-- v5：字段填写采用 best-effort，不会为单个字段长时间等待。
-- 点击 Create 后若仍停留在创建页面（可能校验失败），最多重试 3 次。
-- 每次失败会在 `artifacts/` 记录截图与 HTML，之后关闭浏览器并退出。
+- 字段填写采用 best-effort，不会为单个字段长时间等待。
+- Agent 会记录运行历史到 `artifacts/agent_history.json`，便于回溯失败原因。
+- 若提交后仍停留在创建页面，请根据历史记录与页面提示手动修正。
 
 
 
 ## 提交方式与对话控制
 
-- 默认：skill（本地脚本 + Selenium）。
+- 默认：skill（本地脚本 + Browser-use）。
 - 仅当用户明确指定 MCP，或 skill 失败且用户仍坚持发布时，才切换 MCP。
 
 \1提交流程建议（对话层控制）
@@ -64,10 +64,11 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 - 推荐 work_order.json 使用模板 field `id` 作为键。
 
 
-## Driver 获取策略（默认允许网络兜底）
+## LLM 与运行环境
 
-- 默认不要求用户预装 driver：若未提供 `--driver-path`，Selenium Manager 可能会自动下载（需要网络）。
-- 若用户环境网络受限，请改为安装本地 chromedriver 并通过 `--driver-path` 指定。
+- 需要配置 LLM 凭据（`OPENAI_API_KEY` 或 `BROWSER_USE_API_KEY` 或 Azure OpenAI 变量）。
+- 可用 `--llm-model` 指定 Browser-use 模型名称（如 `openai_gpt_4o_mini`）。
+- 默认会安装 Playwright Chromium；如需跳过可设置 `SKIP_PLAYWRIGHT_INSTALL=1`。
 
 
 ## 防止重复提交死循环
@@ -79,7 +80,7 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 ## 产物位置
 
 - `work_order.json`：由 agent 生成，放在你的工作目录（你能看到/回顾）。
-- `artifacts/`：脚本运行产物，默认与 work_order.json 同目录（包含截图、HTML、校验报告等）。
+- `artifacts/`：脚本运行产物，默认与 work_order.json 同目录（包含 Agent 历史、上下文、校验报告等）。
 - `.venv`：在 skill 目录内创建（隔离依赖）。
 - `chrome_user_data`：默认存放在用户配置目录（复用登录态，避免反复登录）。
 

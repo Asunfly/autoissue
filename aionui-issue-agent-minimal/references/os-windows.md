@@ -1,5 +1,5 @@
 # Windows Notes
 
-- 建议使用 PowerShell。
-- 若 `chromedriver.exe` 不在 PATH，请用 `--driver-path` 指定绝对路径。
-- 公司环境可能限制端口绑定，Selenium 可能无法启动（可切 MCP）。
+- 确保已安装 Chrome 或 Chromium。
+- Browser-use 默认会安装 Playwright Chromium；如需跳过可设置 `SKIP_PLAYWRIGHT_INSTALL=1`。
+- 如需指定浏览器可执行文件，使用 `--browser-binary`。
