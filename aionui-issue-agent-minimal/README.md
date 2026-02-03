@@ -1,6 +1,6 @@
 # aionui-issue-agent-minimal (v19)
 
-最简分支：固定只提交到 GitHub 项目 `iOfficeAI/AionUi`（Bug / Feature）。
+最简分支：固定只提交到 GitHub 项目 `iOfficeAI/AionUi`（Bug / Feature）。底层使用 **Browser-use** 驱动浏览器。
 
 ---
 
@@ -12,7 +12,15 @@
 ### macOS / Linux
 - 运行：`bash run_macos_linux.sh`
 
-> 首次运行会自动创建虚拟环境并安装依赖；会拉起 Chrome（需你手动登录 GitHub 一次），随后自动回填并提交。
+> 首次运行会自动创建虚拟环境并安装依赖，并拉起 Chrome（需你手动登录 GitHub 一次），随后自动回填并提交。
+> 默认会自动安装 Playwright 浏览器（可通过环境变量 `SKIP_PLAYWRIGHT_INSTALL=1` 跳过）。
+
+### 运行前准备（Browser-use / LLM）
+- 需要配置可用的 LLM 访问凭据（以下任一即可）：
+  - `OPENAI_API_KEY`
+  - `BROWSER_USE_API_KEY`
+  - Azure OpenAI 相关变量（`AZURE_OPENAI_API_KEY`/`AZURE_OPENAI_ENDPOINT`）
+- 若你想指定模型，可在命令行传 `--llm-model`（例如 `openai_gpt_4o_mini`）。
 
 ---
 
@@ -38,7 +46,9 @@
     - `cmd_status.txt`：Windows 入口脚本写入的退出码与路径（用于 runner 不回显时确认是否执行）
     - `sh_status.txt`：macOS/Linux 入口脚本写入的退出码与路径（同上）
     - `missing_required_*.png/.html`：表单必填缺失时的截图/页面
-    - `webdriver_error_*.png/.html`：浏览器/驱动异常时的截图/页面
+    - `agent_history.json`：Browser-use Agent 行为历史（用于排查）
+    - `agent_conversation.json`：Agent 对话记录
+    - `agent_context.json`：最终提示词/技能与字段清单
     - `run.log`（如有）：脚本运行日志
 
 **可清理吗？**
@@ -69,6 +79,7 @@
 
 ### 可共享（建议打包时保留）
 - `AGENT_PROMPT.md`（Agent 提示词）
+- `COMMON_SKILL.md`（通用 skill）
 - `SKILL.md`（Skill 说明）
 - `assets/templates/*.yml`（Issue Forms 模板）
 - `assets/examples/*.json`（work_order 示例）
@@ -80,14 +91,21 @@
 - `.venv/`（依赖环境，平台相关，体积大）
 - `chrome_user_data/`（可能包含你的登录态）
 - `work_order.json`（包含你要提交的问题细节）
-- `artifacts/`（可能包含截图、日志、页面内容）
+- `artifacts/`（包含日志、Agent 历史、页面内容）
 
 ---
+
+## AgentPrompt / Skill 使用方式（CLI）
+
+本项目用于在 Codex/Claude Code 等 CLI 环境运行：  
+- `AGENT_PROMPT.md` 作为 **输入提示词**（入口指令）。  
+- `COMMON_SKILL.md` 作为 **通用 skill**（被提示词调用的操作能力）。  
+- 运行脚本会把它们写入 `artifacts/agent_context.json` 方便回溯与审计。
 
 ## 常见问题（FAQ）
 
 ### Q1：为什么不会影响我平时用的 Chrome？
-因为脚本启动 Chrome 时指定了独立的 `--user-data-dir`，它使用的是一个“自动化专用 profile”，不会读取/修改你日常 Chrome 的默认 profile。
+因为脚本启动浏览器时指定了独立的 `--user-data-dir`，它使用的是一个“自动化专用 profile”，不会读取/修改你日常 Chrome 的默认 profile。
 
 ### Q2：我想换一个 GitHub 账号怎么办？
 清理 `chrome_user_data/`（或改用新的 `--user-data-dir`），然后重新运行登录即可。

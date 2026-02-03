@@ -6,10 +6,19 @@
 ## 核心原则
 - 用户输入的所有内容都视为“问题描述”（不要尝试修 bug，不要读取仓库代码）。
 - 默认只提交到固定仓库：`iOfficeAI/AionUi`。
-- 默认提交方式：**Skill（本地脚本 + Selenium）**。
+- 默认提交方式：**Skill（本地脚本 + Browser-use）**。
 - 用户可显式切换：**Chrome DevTools MCP（对话内操控浏览器）**。
 - 只有在缺失“必需信息”时才提问；否则先生成完整草稿。
 - 若用户没有明确“提交/发布”，只展示草稿并询问是否发布。
+
+## 运行前准备（Skill）
+- 需要可用的 LLM 凭据（`OPENAI_API_KEY` / `BROWSER_USE_API_KEY` / Azure OpenAI 变量）。
+- 如需指定模型，可使用 `--llm-model` 传入 Browser-use 模型名称。
+
+## AgentPrompt / Skill 使用方式（CLI）
+- 本项目用于在 Codex/Claude Code 等 CLI 环境运行。
+- `AGENT_PROMPT.md` 作为输入提示词，用于触发对应 skill。
+- `COMMON_SKILL.md` 作为通用 skill 能力，供提示词调用。
 
 ## 变量（此分支固定）
 - {{project_url}} = https://github.com/iOfficeAI/AionUi
@@ -50,7 +59,7 @@
 ## 提交方式选择（对话内控制）
 - 若用户没有指定：`submit_method = "skill"`
 - 若用户说“用 DevTools/MCP/Chrome MCP” → `submit_method = "mcp"`
-- `skill` 方式提交失败（例如：driver 下载/启动失败、登录后未回到模板页、表单控件定位失败、Create 校验失败 3 次）且用户仍希望发布 → 自动切换 `submit_method = "mcp"` 继续提交（不要反复让用户二选一）。
+- `skill` 方式提交失败（例如：浏览器启动失败、LLM 凭据缺失、登录后未回到模板页、表单控件定位失败、Create 校验失败）且用户仍希望发布 → 自动切换 `submit_method = "mcp"` 继续提交（不要反复让用户二选一）。
 
 ## Skill（默认）调用协议（你要生成的 work_order.json）
 你在发布前需生成一个 JSON（建议叫 work_order.json），交给脚本执行：
@@ -144,7 +153,7 @@
 
 可选：
 - `additional_context`
-- `attachments`：本分支先不自动上传，仅记录
+- `attachments`：Browser-use 会尝试上传；若失败则仅记录
 
 ### Feature（feature_request.yml）
 必填：
@@ -171,8 +180,8 @@
 
 - 脚本会先打开模板 URL（issues/new?template=...）。
 - 若未登录会跳转到 GitHub 登录页，脚本会等待用户完成登录，然后自动回到模板页继续回填。
-- 默认使用 skill 目录下 `chrome_user_data/` 复用登录态，减少重复登录。
-- 默认允许网络兜底：若未提供 `--driver-path`，Selenium Manager 可能会自动下载匹配 driver（需要网络）。
+- 默认使用用户配置目录下 `chrome_user_data/` 复用登录态，减少重复登录。
+- 默认会安装 Playwright Chromium（需要网络）；可设置 `SKIP_PLAYWRIGHT_INSTALL=1` 跳过并使用本机浏览器。
 
 
 ## 防止重复提交死循环
