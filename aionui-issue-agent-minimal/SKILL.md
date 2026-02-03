@@ -20,7 +20,9 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 - Schema：见 `references/work_order_schema.md`
 - 示例：
   - Bug：`assets/examples/work_order_bug_example.json`
+  - Bug（完整）：`assets/examples/work_order_bug_full.json`
   - Feature：`assets/examples/work_order_feature_example.json`
+  - Feature（完整）：`assets/examples/work_order_feature_full.json`
 
 ## 运行
 参考 `README.md`（入口脚本、产物路径、常见问题）。

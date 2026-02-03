@@ -17,5 +17,7 @@
   "additional_context": "",
   "attachments": [
     "/abs/path/screenshot.png"
-  ]
+  ],
+  "issue_number": "",
+  "issue_url": ""
 }

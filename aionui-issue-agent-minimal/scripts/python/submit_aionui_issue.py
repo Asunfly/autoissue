@@ -160,7 +160,7 @@ def normalize_work_order_dict(raw: Dict[str, Any]) -> Dict[str, Any]:
     out["additional_context"] = str(out.get("additional_context") or "")
 
     if out["issue_type"] == "bug":
-        out["version"] = str(out.get("version") or "latest")
+        out["version"] = str(out.get("version") or "").strip()
         raw_platform = str(out.get("platform") or "").strip()
         if raw_platform.lower() in ("auto", "detect"):
             raw_platform = ""
@@ -462,8 +462,6 @@ def preflight_validate_required(tpl: dict, norm: Dict[str, Any], out_dir: Path, 
         # dropdowns: treat empty as missing (will be defaulted later by normalize rules, but enforce now)
         if fid == "platform" and not str(val).strip():
             val = _infer_platform_default()
-        if fid == "version" and not str(val).strip():
-            val = "latest"
         if fid == "actual_behavior" and not str(val).strip():
             val = norm.get("bug_description", "")
         if not str(val).strip():
@@ -514,11 +512,6 @@ def apply_template_defaults(tpl: dict, norm: Dict[str, Any]) -> Tuple[Dict[str, 
                     print(f"[WARN] work_order.platform={value!r} is not in template options; using {chosen!r} instead.")
                     out["platform"] = chosen
                     updates["platform"] = chosen
-
-        if fid == "version":
-            if not str(value).strip():
-                out["version"] = "latest"
-                updates["version"] = "latest"
 
         if fid == "actual_behavior":
             if not str(value).strip():
@@ -688,8 +681,6 @@ def main() -> int:
         raw_platform = str(raw_payload.get("platform") or "").strip()
         if "platform" in template_field_ids and (not raw_platform or raw_platform.lower() in ("auto", "detect")):
             wb["platform"] = norm.get("platform", _infer_platform_default())
-        if "version" in template_field_ids and not str(raw_payload.get("version") or "").strip():
-            wb["version"] = norm.get("version", "latest")
         if "actual_behavior" in template_field_ids and not str(raw_payload.get("actual_behavior") or "").strip():
             ab = str(norm.get("actual_behavior") or "")
             if ab.strip():
@@ -731,8 +722,6 @@ def main() -> int:
                 value = pick_valid_option(str(value), options_list)
             if fid == "actual_behavior" and not str(value).strip():
                 value = norm.get("bug_description", "")
-            if fid == "version" and not str(value).strip():
-                value = "latest"
 
             lab, control = find_control_by_label(driver, flabel)
             if control is None:
