@@ -1,4 +1,4 @@
-# aionui-issue-agent-minimal (v19)
+# aionui-issue-agent-minimal (v20)
 
 最简分支：固定只提交到 GitHub 项目 `iOfficeAI/AionUi`（Bug / Feature）。
 
@@ -8,9 +8,13 @@
 
 ### Windows
 - 仅运行：`run_windows.cmd`
+  - 传额外参数给 Python（调试推荐）：`run_windows.cmd "D:\\my-issues\\work_order.json" --no-submit`
+  - 强制再次提交（忽略 issue_number/issue_url 去重保护）：`run_windows.cmd "D:\\my-issues\\work_order.json" --force`
 
 ### macOS / Linux
 - 运行：`bash run_macos_linux.sh`
+  - 传额外参数给 Python（调试推荐）：`bash run_macos_linux.sh /path/to/work_order.json --no-submit`
+  - 强制再次提交（忽略 issue_number/issue_url 去重保护）：`bash run_macos_linux.sh /path/to/work_order.json --force`
 
 > 首次运行会自动创建虚拟环境并安装依赖；会拉起 Chrome（需你手动登录 GitHub 一次），随后自动回填并提交。
 
@@ -29,6 +33,8 @@
     - `issue_url`（例如 `"https://github.com/iOfficeAI/AionUi/issues/626"`）
 
 > work_order.json 的字段名必须与 `assets/templates/*.yml` 中的 YAML `id` 对齐；可参考 `assets/examples/` 里的示例。
+>
+> 小技巧：Bug 的 `platform` 可写 `"auto"`（或留空）让脚本在运行时按当前系统推断，并写回为模板可选值。
 
 ### 2) 运行过程中生成的产物（用户可见，建议保留用于排查）
 - **artifacts/**（默认与 work_order.json 同目录）

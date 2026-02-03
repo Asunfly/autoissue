@@ -1,19 +1,57 @@
 ---
 name: github-issue-autosubmit-aionui
-description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOfficeAI/AionUi。默认用 Python + Selenium 打开 GitHub、等待用户登录、选择模板、填表、可选上传附件、点击 Create。支持 macOS/Windows/Ubuntu；通过 work_order.json 传入变量；也可选择 Chrome DevTools MCP 流程（不依赖本脚本）。
+description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOfficeAI/AionUi。默认用 Python + Selenium 打开 GitHub、等待用户登录、选择模板、填表、点击 Create。支持 macOS/Windows/Ubuntu；通过 work_order.json 传入变量；也可选择 Chrome DevTools MCP 流程（不依赖本脚本）。
 ---
 
-# GitHub Issue AutoSubmit (AionUi Minimal, v19)
+# GitHub Issue AutoSubmit (AionUi Minimal, v20)
 
 ## 适用场景
-- 用户说“帮我提个 bug/提个 issue/一键提交”，目标仓库固定 `iOfficeAI/AionUi`
-- 你已在对话中生成好了结构化 issue 内容（title / version / description / steps / expected / attachments）
+- 你已经准备好结构化的 Issue 内容（对应 `assets/templates/*.yml` 的字段 `id`）
+- 你想把这些内容自动填写到 GitHub Issue Form 并提交到固定仓库 `iOfficeAI/AionUi`
+- 可被对话式 Agent 调用，也可脱离 Agent **直接手动运行**
+
+## 能力边界（重要）
+- ✅ 支持：Bug / Feature（Issue Forms 模板驱动回填），手动登录等待，失败截图/HTML/日志落盘
+- ✅ 支持：`--no-submit`（仅填表不点击 Create）、`--headless`、`--force`（忽略去重保护）
+- ✅ 支持：Bug 的 `platform` 自动推断（`"platform":"auto"`/缺省时写回为模板可选值）
+- ❌ 不支持（最简分支）：自动上传附件（需要上传请改用 MCP 或手动上传）
 
 ## 输入（work_order.json）
-见 `assets/example_work_order_bug.json`。
+- Schema：见 `references/work_order_schema.md`
+- 示例：
+  - Bug：`assets/examples/work_order_bug_example.json`
+  - Feature：`assets/examples/work_order_feature_example.json`
 
 ## 运行
-参考 `README.md`。
+参考 `README.md`（入口脚本、产物路径、常见问题）。
+
+## 文件结构（你在仓库里能看到的）
+- `run_windows.cmd` / `run_macos_linux.sh`：跨平台入口（创建 venv、安装依赖、调用 Python）
+- `scripts/python/submit_aionui_issue.py`：核心提交脚本（读取模板、校验、打开 GitHub、回填、提交）
+- `assets/templates/*.yml`：GitHub Issue Forms 模板（字段 id/必填/options 的事实来源）
+- `assets/examples/*.json`：work_order 示例
+- `references/*.md`：平台/driver/排障说明
+
+## 与 Agent Prompt 的关系（重要）
+- **Skill 不会读取/依赖 `AGENT_PROMPT.md`**；Skill 的输入只有 `work_order.json` + CLI 参数。
+- `AGENT_PROMPT.md` 仅用于“对话层”的内容抽取与决策（何时生成/何时提交），属于可编辑的上层策略文件；Skill 可以被替换成任意实现，只要保持 `work_order.json` 协议与 CLI 行为一致。
+
+## 入口脚本（跨平台）
+- Windows：`run_windows.cmd [work_order.json 路径] [python 参数...]`
+- macOS/Linux：`bash run_macos_linux.sh [work_order.json 路径] [python 参数...]`
+
+入口脚本会把额外参数透传给 `scripts/python/submit_aionui_issue.py`。
+
+## 常用参数（透传给 Python）
+- `--no-submit`：仅填表，不点击 Create（调试推荐）
+- `--headless`：无界面模式（服务器/CI）
+- `--user-data-dir <dir>`：复用 GitHub 登录态（强烈建议）
+- `--profile-dir <name>`：指定 user-data-dir 内的 profile
+- `--driver-path <path>`：指定 chromedriver（网络受限时推荐）
+- `--login-wait-sec <sec>`：等待手动登录的最长时间
+- `--timeout-sec <sec>`：元素等待超时
+- `--pause-before-submit-sec <sec>`：填表后暂停检查再提交
+- `--force`：忽略 `issue_number/issue_url` 的去重保护，强制再次提交
 
 ## 运行策略
 - 默认：有界面模式，脚本会停在登录态判断处，等待用户手动登录。
@@ -37,25 +75,9 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 
 
 ## 不阻塞填写 & 失败重试
-
-- v5：字段填写采用 best-effort，不会为单个字段长时间等待。
+- 字段填写采用 best-effort，不会为单个字段长时间等待。
 - 点击 Create 后若仍停留在创建页面（可能校验失败），最多重试 3 次。
 - 每次失败会在 `artifacts/` 记录截图与 HTML，之后关闭浏览器并退出。
-
-
-
-## 提交方式与对话控制
-
-- 默认：skill（本地脚本 + Selenium）。
-- 仅当用户明确指定 MCP，或 skill 失败且用户仍坚持发布时，才切换 MCP。
-
-\1提交流程建议（对话层控制）
-
-- 是否提交由 **Agent 对话意图** 决定：
-  - 未明确提交：仅输出草稿并询问“现在发布提交吗？”
-  - 明确提交：生成 `work_order.json`，直接运行脚本创建 issue
-- `work_order.json` 不再需要 `dry_run` 字段。
-- 调试时可用 `--no-submit`（仅填表不点 Create）。
 
 
 ## YAML 驱动回填
@@ -73,7 +95,7 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 ## 防止重复提交死循环
 
 - `work_order.json` 增加字段：`issue_number`、`issue_url`（默认空）。
-- 脚本提交成功后会回写这两个字段；如果 `issue_number` 已存在，脚本将直接退出，避免重复创建。
+- 脚本提交成功后会回写这两个字段；如果 `issue_number/issue_url` 已存在且未指定 `--force`，脚本将直接退出，避免重复创建。
 
 
 ## 产物位置

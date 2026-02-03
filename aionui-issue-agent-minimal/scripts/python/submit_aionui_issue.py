@@ -75,6 +75,12 @@ def pick_valid_option(value: str, options: List[str]) -> str:
             return o
     return options[0]
 
+def option_matches(value: str, options: List[str]) -> bool:
+    v = (value or "").strip().lower()
+    if not v or not options:
+        return False
+    return any(v == str(o).strip().lower() for o in options)
+
 
 # ---------------------------
 # Work order
@@ -114,6 +120,9 @@ def _infer_platform_default() -> str:
     if "linux" in sysname:
         return "Linux"
     if "darwin" in sysname or "mac" in sysname:
+        machine = (py_platform.machine() or "").lower()
+        if machine in ("arm64", "aarch64"):
+            return "macOS (Apple Silicon)"
         return "macOS (Intel)"
     return "Windows"
 
@@ -144,13 +153,18 @@ def normalize_work_order_dict(raw: Dict[str, Any]) -> Dict[str, Any]:
     else:
         out["steps_to_reproduce"] = str(steps or "")
 
-    # bug mappings
+    # bug mappings (only meaningful for bug template)
     out["bug_description"] = str(out.get("bug_description") or out.get("description") or "")
     out["expected_behavior"] = str(out.get("expected_behavior") or out.get("expected") or "")
     out["actual_behavior"] = str(out.get("actual_behavior") or out["bug_description"] or "")
-    out["version"] = str(out.get("version") or "latest")
-    out["platform"] = str(out.get("platform") or _infer_platform_default())
     out["additional_context"] = str(out.get("additional_context") or "")
+
+    if out["issue_type"] == "bug":
+        out["version"] = str(out.get("version") or "latest")
+        raw_platform = str(out.get("platform") or "").strip()
+        if raw_platform.lower() in ("auto", "detect"):
+            raw_platform = ""
+        out["platform"] = raw_platform or _infer_platform_default()
 
     # feature mappings
     out["feature_description"] = str(out.get("feature_description") or out.get("description") or "")
@@ -389,6 +403,27 @@ def _extract_issue_number_from_url(url: str) -> str:
     m = re.search(r"/issues/(\d+)(?:$|[/?#])", url or "")
     return m.group(1) if m else ""
 
+def _write_back_defaults_if_needed(path: Path, updates: Dict[str, Any]) -> None:
+    """
+    Best-effort write-back to work_order.json for auto-defaulted fields.
+    Helps when a work_order.json is moved across machines/OSes.
+    """
+    if not updates:
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    changed = False
+    for k, v in updates.items():
+        if data.get(k, None) != v:
+            data[k] = v
+            changed = True
+    if not changed:
+        return
+    with contextlib.suppress(Exception):
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
 
 def _update_work_order_file(path: Path, issue_url: str) -> None:
     """
@@ -450,6 +485,56 @@ def preflight_validate_required(tpl: dict, norm: Dict[str, Any], out_dir: Path, 
             print(f" - {m['label']} (id={m['id']}, type={m['type']})")
         raise SystemExit(2)
 
+def apply_template_defaults(tpl: dict, norm: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Apply safe defaults/coercions so platform/version/actual_behavior don't block submission.
+    Returns (updated_norm, write_back_updates).
+    """
+    out = dict(norm or {})
+    updates: Dict[str, Any] = {}
+
+    for field in all_fields_from_template(tpl):
+        fid = field.get("id")
+        ftype = field_type(field)
+        options_list = field_options(field)
+        value = out.get(fid, "")
+
+        if fid == "platform" and ftype == "dropdown":
+            if not str(value).strip():
+                inferred = _infer_platform_default()
+                chosen = inferred if option_matches(inferred, options_list) else pick_valid_option("", options_list)
+                out["platform"] = chosen
+                updates["platform"] = chosen
+            else:
+                # Keep user-provided platform even if it differs from inferred,
+                # but if it's not in template options, coerce to inferred/first option.
+                if options_list and not option_matches(str(value), options_list):
+                    inferred = _infer_platform_default()
+                    chosen = inferred if option_matches(inferred, options_list) else pick_valid_option("", options_list)
+                    print(f"[WARN] work_order.platform={value!r} is not in template options; using {chosen!r} instead.")
+                    out["platform"] = chosen
+                    updates["platform"] = chosen
+
+        if fid == "version":
+            if not str(value).strip():
+                out["version"] = "latest"
+                updates["version"] = "latest"
+
+        if fid == "actual_behavior":
+            if not str(value).strip():
+                fallback = str(out.get("bug_description", "") or "")
+                if fallback.strip():
+                    out["actual_behavior"] = fallback
+                    updates["actual_behavior"] = fallback
+
+        if fid == "feature_category" and ftype == "dropdown":
+            if options_list and not option_matches(str(value), options_list):
+                chosen = pick_valid_option(str(value), options_list)
+                out["feature_category"] = chosen
+                updates["feature_category"] = chosen
+
+    return out, updates
+
 
 class _Tee:
     """Write to multiple text streams (used to tee stdout/stderr into artifacts/run.log)."""
@@ -503,6 +588,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--artifacts-dir", default="artifacts", help="Where to write debug artifacts")
     p.add_argument("--no-submit", action="store_true", help="Fill form but DO NOT click Create")
     p.add_argument("--pause-before-submit-sec", type=int, default=10, help="Pause after filling, before clicking Create")
+    p.add_argument("--force", action="store_true", help="Ignore existing issue_number/issue_url and submit anyway")
     return p.parse_args()
 
 
@@ -522,17 +608,37 @@ def main() -> int:
     # Prevent resubmission loop: if issue_number already present, exit.
     try:
         _pre = json.loads(work_order_path.read_text(encoding='utf-8'))
-        if str(_pre.get('issue_number') or '').strip():
-            print(f"work_order.json already has issue_number={_pre.get('issue_number')}, skip submission.")
-            if _pre.get('issue_url'):
-                print(f"Existing issue_url: {_pre.get('issue_url')}")
-            return 0
+        if not args.force:
+            existing_issue_number = str(_pre.get('issue_number') or '').strip()
+            existing_issue_url = str(_pre.get('issue_url') or '').strip()
+            if not existing_issue_number and existing_issue_url:
+                existing_issue_number = _extract_issue_number_from_url(existing_issue_url)
+            if existing_issue_number or existing_issue_url:
+                msg = f"work_order.json already has issue_number={existing_issue_number!r}" if existing_issue_number else "work_order.json already has issue_url"
+                print(f"{msg}, skip submission.")
+                if existing_issue_url:
+                    print(f"Existing issue_url: {existing_issue_url}")
+                print("To submit again, clear issue_number/issue_url in work_order.json or pass --force.")
+                return 0
     except Exception:
         pass
 
     wo = load_work_order(work_order_path)
+    # Warn only for bug template (feature template doesn't have platform field).
+    try:
+        if wo.issue_type == "bug":
+            inferred_platform = _infer_platform_default()
+            if (wo.platform or "").strip() and wo.platform.strip() != inferred_platform:
+                sysname = py_platform.system()
+                machine = py_platform.machine()
+                print(
+                    f"[WARN] work_order.platform={wo.platform!r} differs from inferred={inferred_platform!r} "
+                    f"(system={sysname!r}, machine={machine!r}). If you moved this work_order.json across OS, update 'platform'."
+                )
+    except Exception:
+        pass
 
-    # Default user-data-dir under skill root to reduce repeated login.
+    # Default user-data-dir under user config dir to reduce repeated login.
     if not args.user_data_dir:
         # Persistent profile outside skill folder to avoid re-login and keep work outputs clean
         home = Path.home()
@@ -576,6 +682,22 @@ def main() -> int:
         raw_payload = json.loads(work_order_path.read_text(encoding="utf-8"))
         norm = normalize_work_order_dict(raw_payload)
         tpl = load_issue_template(template_path)
+        template_field_ids = {str(f.get("id")) for f in all_fields_from_template(tpl) if f.get("id")}
+        wb: Dict[str, Any] = {}
+        # If user didn't specify these (or used "auto"), write back the auto-defaults to work_order.json.
+        raw_platform = str(raw_payload.get("platform") or "").strip()
+        if "platform" in template_field_ids and (not raw_platform or raw_platform.lower() in ("auto", "detect")):
+            wb["platform"] = norm.get("platform", _infer_platform_default())
+        if "version" in template_field_ids and not str(raw_payload.get("version") or "").strip():
+            wb["version"] = norm.get("version", "latest")
+        if "actual_behavior" in template_field_ids and not str(raw_payload.get("actual_behavior") or "").strip():
+            ab = str(norm.get("actual_behavior") or "")
+            if ab.strip():
+                wb["actual_behavior"] = ab
+
+        norm, wb2 = apply_template_defaults(tpl, norm)
+        wb.update(wb2)
+        _write_back_defaults_if_needed(work_order_path, wb)
         preflight_validate_required(tpl, norm, artifacts, wo.issue_type)
 
         # 1) Open template url
