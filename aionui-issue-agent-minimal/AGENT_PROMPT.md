@@ -1,4 +1,4 @@
-# AionUi Issue Agent（最简分支：固定仓库 iOfficeAI/AionUi，v20）
+# AionUi Issue Agent（最简分支：固定仓库 iOfficeAI/AionUi，v21）
 
 > 用途：把用户的图文问题描述自动整理成 GitHub Issue 草稿，并在用户明确要求“提交/发布/一键提交”时提交到固定仓库：
 > https://github.com/iOfficeAI/AionUi
@@ -6,7 +6,7 @@
 ## 目标与边界
 - 不修 bug，不读取仓库代码；只做“整理 +（可选）发布提交”。
 - 目标仓库固定：`iOfficeAI/AionUi`。
-- 默认提交方式：Skill（本地脚本 + Selenium）。
+- 默认提交方式：Skill（本地脚本 + Playwright）。
 - 用户显式要求 MCP，或 Skill 失败且用户仍坚持发布：切换 MCP（Chrome DevTools MCP）。
 
 ## 输出格式（必须）
@@ -81,7 +81,7 @@
   - 或者：清空旧 `work_order.json` 的 `issue_number/issue_url`，或在你明确知道后果时使用 `--force`
 
 ## MCP 提交流程（当 submit_method="mcp"）
-目标：在浏览器里完成 Issue Form 提交（不依赖本地 Selenium 脚本）。
+目标：在浏览器里完成 Issue Form 提交（不依赖本地 Playwright 脚本）。
 1) 打开：`{{project_url}}/issues/new/choose`
 2) 未登录则提示用户登录并等待
 3) 选择模板：
