@@ -1,4 +1,4 @@
-# AionUi Issue Agent（最简分支：固定仓库 iOfficeAI/AionUi，v21）
+# AionUi Issue Agent（最简分支：固定仓库 iOfficeAI/AionUi，v22）
 
 > 用途：把用户的图文问题描述自动整理成 GitHub Issue 草稿，并在用户明确要求“提交/发布/一键提交”时提交到固定仓库：
 > https://github.com/iOfficeAI/AionUi

@@ -122,6 +122,31 @@ def _infer_platform_default() -> str:
     return "Windows"
 
 
+def _apply_playwright_platform_override_for_macos_arm64() -> None:
+    if py_platform.system().lower() != "darwin":
+        return
+    if os.environ.get("PLAYWRIGHT_HOST_PLATFORM_OVERRIDE"):
+        return
+    machine = (py_platform.machine() or "").lower()
+    if machine not in ("arm64", "aarch64"):
+        return
+    try:
+        kernel_major = int((py_platform.release() or "").split(".")[0])
+    except Exception:
+        kernel_major = 24
+    if kernel_major < 18:
+        override = "mac10.13-arm64"
+    elif kernel_major == 18:
+        override = "mac10.14-arm64"
+    elif kernel_major == 19:
+        override = "mac10.15-arm64"
+    else:
+        mac_major = min(max(kernel_major - 9, 11), 15)
+        override = f"mac{mac_major}-arm64"
+    os.environ["PLAYWRIGHT_HOST_PLATFORM_OVERRIDE"] = override
+    print(f"[INFO] Set PLAYWRIGHT_HOST_PLATFORM_OVERRIDE={override} for macOS arm64.")
+
+
 def normalize_work_order_dict(raw: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalize payload into template-id-aligned keys.
@@ -577,6 +602,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    _apply_playwright_platform_override_for_macos_arm64()
     args = parse_args()
     if not args.work_order and args.work_order_file:
         args.work_order = args.work_order_file
@@ -769,6 +795,23 @@ def main() -> int:
         raise SystemExit(f"Timeout waiting for element/state: {e}") from e
     except PlaywrightError as e:
         save_debug(page, artifacts, "browser_error") if page else None
+        err_text = str(e)
+        print(f"[ERROR] Playwright detail: {err_text}")
+        if "Executable doesn't exist" in err_text:
+            print(
+                "[HINT] Browser executable path mismatch. "
+                "Try reinstalling browsers: `python -m playwright install chromium`."
+            )
+            if py_platform.system().lower() == "darwin" and (py_platform.machine() or "").lower() in ("arm64", "aarch64"):
+                print(
+                    "[HINT] On macOS arm64, if runtime resolves to mac-x64 path, "
+                    "set `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=mac15-arm64` before running."
+                )
+        if "bootstrap_check_in" in err_text and "Permission denied (1100)" in err_text:
+            print(
+                "[HINT] Browser launch is blocked by current runtime permissions/sandbox. "
+                "Run in a normal terminal session or switch to MCP submission path."
+            )
         raise SystemExit(
             "Playwright 启动/运行失败：可能未安装浏览器或依赖不足。"
             " 解决：先运行 `python -m playwright install chromium`，必要时补齐系统依赖或改用 MCP。"

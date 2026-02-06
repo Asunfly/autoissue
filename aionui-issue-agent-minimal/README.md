@@ -1,4 +1,4 @@
-# aionui-issue-agent-minimal (v21)
+# aionui-issue-agent-minimal (v22)
 
 最简分支：固定只提交到 GitHub 项目 `iOfficeAI/AionUi`（Bug / Feature）。
 
@@ -16,7 +16,7 @@
   - 传额外参数给 Python（调试推荐）：`bash run_macos_linux.sh /path/to/work_order.json --no-submit`
   - 强制再次提交（忽略 issue_number/issue_url 去重保护）：`bash run_macos_linux.sh /path/to/work_order.json --force`
 
-> 入口脚本已简化为薄包装，实际初始化由 `scripts/python/bootstrap.py` 完成（创建 venv、安装依赖、安装浏览器）。首次运行会拉起 Chromium（需你手动登录 GitHub 一次），随后自动回填并提交。若环境已预装浏览器缓存，可设置 `SKIP_PLAYWRIGHT_INSTALL=1` 跳过浏览器下载。
+> 入口脚本已简化为薄包装，实际初始化由 `scripts/python/bootstrap.py` 完成（创建 venv、安装依赖、安装浏览器）。默认是有头模式，首次运行需你手动登录 GitHub 一次；后续会复用 `chromium_user_data` 登录态（若会话过期仍需重新登录）。
 
 ---
 
@@ -40,6 +40,13 @@
 - `SKIP_PLAYWRIGHT_INSTALL=1`：跳过 Playwright 浏览器下载（已预置浏览器缓存时使用）
 - `PAUSE_BEFORE_SUBMIT_SEC=10`：填表后暂停秒数（默认 10）
 - `PYTHON_BIN=python3`：仅 macOS/Linux 下可指定 Python 解释器
+- `PLAYWRIGHT_INSTALL_RETRIES=3`：浏览器下载失败重试次数（默认 3）
+- `PLAYWRIGHT_INSTALL_RETRY_DELAY_SEC=2`：重试基础等待秒数（指数退避）
+- `PLAYWRIGHT_INSTALL_TIMEOUT_SEC=240`：单次浏览器下载超时秒数（默认 240）
+- `BOOTSTRAP_UPGRADE_PIP=1`：需要时才升级 pip（默认不升级，弱网更稳）
+- `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE`：手动覆盖 Playwright 平台（一般不需要；macOS arm64 入口脚本会自动设置）
+
+> 若 Playwright 浏览器下载多次失败，bootstrap 会自动尝试回退到系统已安装的 Chrome/Chromium（无需额外参数）。
 
 ### 2) 运行过程中生成的产物（用户可见，建议保留用于排查）
 - **artifacts/**（默认与 work_order.json 同目录）

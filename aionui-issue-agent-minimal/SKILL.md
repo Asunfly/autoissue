@@ -3,7 +3,7 @@ name: github-issue-autosubmit-aionui
 description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOfficeAI/AionUi。默认用 Python + Playwright 打开 GitHub、等待用户登录、选择模板、填表、点击 Create。支持 macOS/Windows/Ubuntu；通过 work_order.json 传入变量；也可选择 Chrome DevTools MCP 流程（不依赖本脚本）。
 ---
 
-# GitHub Issue AutoSubmit (AionUi Minimal, v21)
+# GitHub Issue AutoSubmit (AionUi Minimal, v22)
 
 ## 适用场景
 - 你已经准备好结构化的 Issue 内容（对应 `assets/templates/*.yml` 的字段 `id`）
@@ -57,7 +57,7 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 
 ## 运行策略
 - 默认：有界面模式，脚本会停在登录态判断处，等待用户手动登录。
-- 建议：加 `--user-data-dir` 复用登录态，减少反复登录。
+- 首次登录后会复用默认 `chromium_user_data`，后续通常无需重复登录（会话过期除外）。
 
 ## 注意
 - GitHub 页面 class 经常变化，脚本尽量使用 `aria-label`/`data-testid`/可见文本定位。
@@ -91,13 +91,19 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 ## Playwright 安装与浏览器缓存策略
 
 - 依赖安装后需执行 `python -m playwright install chromium` 下载浏览器。
-- 入口脚本已内置该步骤；如果网络受限或无法下载，可在可联网环境先完成下载再迁移浏览器缓存。
+- 入口脚本已内置该步骤，并带默认重试（指数退避）。
+- 若下载仍失败，入口脚本会自动尝试回退到系统已安装浏览器（Chrome/Chromium）。
 - 若已准备好浏览器缓存，可设置 `SKIP_PLAYWRIGHT_INSTALL=1` 跳过下载。
 
 ## 可选环境变量
 - `SKIP_PLAYWRIGHT_INSTALL=1`：跳过 Playwright 浏览器下载（已预置浏览器缓存时使用）
 - `PAUSE_BEFORE_SUBMIT_SEC=10`：填表后暂停秒数（默认 10）
 - `PYTHON_BIN=python3`：仅 macOS/Linux 下可指定 Python 解释器
+- `PLAYWRIGHT_INSTALL_RETRIES=3`：浏览器下载失败重试次数（默认 3）
+- `PLAYWRIGHT_INSTALL_RETRY_DELAY_SEC=2`：重试基础等待秒数（指数退避）
+- `PLAYWRIGHT_INSTALL_TIMEOUT_SEC=240`：单次浏览器下载超时秒数（默认 240）
+- `BOOTSTRAP_UPGRADE_PIP=1`：需要时才升级 pip（默认不升级，弱网更稳）
+- `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE`：手动覆盖 Playwright 平台（一般不需要；macOS arm64 入口脚本会自动设置）
 
 
 ## 防止重复提交死循环
