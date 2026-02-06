@@ -1,10 +1,12 @@
 # Troubleshooting
 
-1) SessionNotCreatedException：Chrome 与 ChromeDriver 主版本不匹配  
-- 安装匹配版本 driver，并 `--driver-path` 指定。
+1) Playwright 浏览器启动失败  
+- 先执行 `python -m playwright install chromium`。
+- 仍失败时，用 `--browser-binary` 指向系统浏览器，或改用 MCP。
+ - 若不允许联网下载，可设置 `SKIP_PLAYWRIGHT_INSTALL=1` 并使用已缓存的浏览器。
 
 2) Can't find free port / Unable to bind  
-- 环境禁止绑定本地端口（Selenium 需要）。改用 MCP 或换可运行环境。
+- 环境禁止绑定本地端口。改用 MCP 或换可运行环境。
 
 3) 元素找不到  
 - GitHub UI 变更。打开 `artifacts/*.html` 看当前 DOM，调整 selector 或改用 MCP。

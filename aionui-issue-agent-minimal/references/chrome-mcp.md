@@ -1,6 +1,5 @@
-# Chrome DevTools MCP Playbook（可选）
+# Chrome DevTools MCP
 
-当 Selenium 因端口限制/driver 不可用/页面变更失败时，切换到 MCP：
-- 用 snapshot 获取元素 uid
-- fill/click 执行填写与提交
-- 适合“边看边调”的场景
+当 Playwright 因端口限制/浏览器不可用/页面变更失败时，切换到 MCP：
+- 交互更灵活，可实时获取元素并填写
+- 适合企业环境、受限网络或 GUI 不完整的机器
