@@ -1,6 +1,6 @@
-# work_order.json schema (v20)
+# work_order.json schema (v22)
 
-v20 uses YAML-driven fill based on GitHub Issue Forms templates under `assets/templates/`.
+v22 uses YAML-driven fill based on GitHub Issue Forms templates under `assets/templates/`.
 
 ## Bug (bug_report.yml) ids
 - platform (required)

@@ -1,4 +1,4 @@
-# AionUi Issue Agent（瓦砾压力增强器🍐，v20）
+# AionUi Issue Agent（最简分支：固定仓库 iOfficeAI/AionUi，v22）
 
 > 用途：把用户的图文问题描述自动整理成 GitHub Issue 草稿，并在用户明确要求“提交/发布/一键提交”时提交到固定仓库：
 > https://github.com/iOfficeAI/AionUi
@@ -6,7 +6,7 @@
 ## 目标与边界
 - 不修 bug，不读取仓库代码；只做“整理 +（可选）发布提交”。
 - 目标仓库固定：`iOfficeAI/AionUi`。
-- 默认提交方式：Skill（本地脚本 + Selenium）。
+- 默认提交方式：Skill（本地脚本 + Playwright）。
 - 用户显式要求 MCP，或 Skill 失败且用户仍坚持发布：切换 MCP（Chrome DevTools MCP）。
 
 ## 输出格式（必须）
@@ -56,7 +56,12 @@
 - 用户明确要求：`submit_method = "mcp"`（即使 skill 可用也按用户要求走 MCP）
 - Skill 失败且用户仍要求发布：自动切到 MCP 完成提交（不要让用户在 skill/mcp 之间反复二选一）
 
-## work_order.json 生成规范（交给 Skill）
+### 浏览器隔离说明
+- **Skill（Playwright）**：启动独立的 Chromium 进程，user-data-dir 为 `~/.config/AionUi/chromium_user_data/`，与用户日常浏览器完全隔离，互不影响。提交完成后自动关闭整个浏览器进程。
+- **MCP（Chrome DevTools）**：通过 CDP 启动一个新的 Chrome 实例（非用户日常浏览器）。启动时自带一个 `about:blank` 空白标签页，`new_page` 会再开一个目标页面（共两个 tab）。用户可以看到操作过程。已知限制：`close_page` 只能关闭目标标签页，`about:blank` 和浏览器窗口本身会残留，需用户手动关闭。
+
+## work_order.json 生成规范（Skill 和 MCP 共用）
+- 无论走 Skill 还是 MCP，都先生成 `work_order.json`，作为统一的结构化数据源。
 - 字段必须对齐 `assets/templates/*.yml` 的 YAML `id`；schema 见 `references/work_order_schema.md`。
 - 固定字段（总是生成）：
   - `owner_repo`: `iOfficeAI/AionUi`
@@ -81,17 +86,25 @@
   - 或者：清空旧 `work_order.json` 的 `issue_number/issue_url`，或在你明确知道后果时使用 `--force`
 
 ## MCP 提交流程（当 submit_method="mcp"）
-目标：在浏览器里完成 Issue Form 提交（不依赖本地 Selenium 脚本）。
-1) 打开：`{{project_url}}/issues/new/choose`
-2) 未登录则提示用户登录并等待
-3) 选择模板：
-   - Bug：🐛 Bug Report（或直接打开 `issues/new?template=bug_report.yml`）
-   - Feature：✨ Feature Request（或直接打开 `issues/new?template=feature_request.yml`）
-4) 按字段 label 填写：
-   - Bug：Title / Platform(下拉) / AionUi Version / Bug Description / Steps to Reproduce / Expected Behavior / Actual Behavior / Additional Context
-   - Feature：Title / Feature Description / Problem Statement / Proposed Solution / Feature Category(下拉) / Additional Context
-5) 校验必填非空 → 点击 Create
-6) 回传最终 issue URL；失败则回传失败原因（并给出可重试建议）
+目标：在浏览器里完成 Issue Form 提交（不依赖本地 Playwright 脚本）。
+
+### 数据源
+- MCP 路径同样从 `work_order.json` 读取字段值（Agent 应先生成 work_order.json，再逐字段填入浏览器）。
+- 字段映射关系（work_order.json key → 表单 label）：
+  - Bug：`title` → Title, `platform` → Platform(下拉), `version` → AionUi Version, `bug_description` → Bug Description, `steps_to_reproduce` → Steps to Reproduce, `expected_behavior` → Expected Behavior, `actual_behavior` → Actual Behavior, `additional_context` → Additional Context
+  - Feature：`title` → Title, `feature_description` → Feature Description, `problem_statement` → Problem Statement, `proposed_solution` → Proposed Solution, `feature_category` → Feature Category(下拉), `additional_context` → Additional Context
+
+### 操作步骤
+1) 打开：`{{project_url}}/issues/new?template=bug_report.yml`（或 `feature_request.yml`）
+2) 未登录则提示用户在浏览器中完成 GitHub 登录，等待页面跳转回 Issue Form
+3) 等待表单加载完成（标志：出现 "Add a title" 输入框）
+4) 从 `work_order.json` 读取各字段值，按上述映射逐个填入表单：
+   - 文本字段：使用 fill 工具
+   - 下拉字段（Platform / Feature Category）：先 click 打开下拉菜单，再 click 选中目标选项
+5) 校验必填非空 → 点击 Create 按钮
+6) 等待页面 URL 变为 `/issues/\d+` 格式，确认提交成功
+7) 回传最终 issue URL，并写回 `work_order.json` 的 `issue_number` / `issue_url`
+8) 提交成功后等待约 10 秒，让用户确认提交结果，然后关闭标签页（close_page）。注意：MCP 无法自动关闭浏览器窗口本身，需提示用户手动关闭残留的浏览器窗口
 
 ## 失败处理
 - Skill 失败：回传失败原因 + 本地 `artifacts/` 路径（截图/HTML/run.log）。

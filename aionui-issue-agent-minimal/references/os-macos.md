@@ -1,4 +1,4 @@
 # macOS Notes
 
-- 确保已安装 Chrome 或 Chromium。
-- 若 ChromeDriver 版本不匹配，建议安装与 Chrome 主版本匹配的 chromedriver，并用 `--driver-path` 指定。
+- 确保可运行 Chromium 或 Chrome。
+- 如遇 Playwright 浏览器无法启动，先执行 `python -m playwright install chromium`，必要时改用 `--browser-binary` 指向系统浏览器。

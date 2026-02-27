@@ -1,9 +1,9 @@
 ---
 name: github-issue-autosubmit-aionui
-description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOfficeAI/AionUi。默认用 Python + Selenium 打开 GitHub、等待用户登录、选择模板、填表、点击 Create。支持 macOS/Windows/Ubuntu；通过 work_order.json 传入变量；也可选择 Chrome DevTools MCP 流程（不依赖本脚本）。
+description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOfficeAI/AionUi。默认用 Python + Playwright 打开 GitHub、等待用户登录、选择模板、填表、点击 Create。支持 macOS/Windows/Ubuntu；通过 work_order.json 传入变量；也可选择 Chrome DevTools MCP 流程（不依赖本脚本）。
 ---
 
-# GitHub Issue AutoSubmit (AionUi Minimal, v20)
+# GitHub Issue AutoSubmit (AionUi Minimal, v22)
 
 ## 适用场景
 - 你已经准备好结构化的 Issue 内容（对应 `assets/templates/*.yml` 的字段 `id`）
@@ -32,7 +32,7 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 - `scripts/python/submit_aionui_issue.py`：核心提交脚本（读取模板、校验、打开 GitHub、回填、提交）
 - `assets/templates/*.yml`：GitHub Issue Forms 模板（字段 id/必填/options 的事实来源）
 - `assets/examples/*.json`：work_order 示例
-- `references/*.md`：平台/driver/排障说明
+- `references/*.md`：平台/排障说明
 
 ## 与 Agent Prompt 的关系（重要）
 - **Skill 不会读取/依赖 `AGENT_PROMPT.md`**；Skill 的输入只有 `work_order.json` + CLI 参数。
@@ -42,14 +42,14 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 - Windows：`run_windows.cmd [work_order.json 路径] [python 参数...]`
 - macOS/Linux：`bash run_macos_linux.sh [work_order.json 路径] [python 参数...]`
 
-入口脚本会把额外参数透传给 `scripts/python/submit_aionui_issue.py`。
+入口脚本已简化为薄包装，实际初始化由 `scripts/python/bootstrap.py` 完成（创建 venv、安装依赖、安装浏览器），并把额外参数透传给 `scripts/python/submit_aionui_issue.py`。
 
 ## 常用参数（透传给 Python）
 - `--no-submit`：仅填表，不点击 Create（调试推荐）
 - `--headless`：无界面模式（服务器/CI）
 - `--user-data-dir <dir>`：复用 GitHub 登录态（强烈建议）
 - `--profile-dir <name>`：指定 user-data-dir 内的 profile
-- `--driver-path <path>`：指定 chromedriver（网络受限时推荐）
+- `--browser-binary <path>`：指定 Chromium/Chrome 可执行路径
 - `--login-wait-sec <sec>`：等待手动登录的最长时间
 - `--timeout-sec <sec>`：元素等待超时
 - `--pause-before-submit-sec <sec>`：填表后暂停检查再提交
@@ -57,7 +57,7 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 
 ## 运行策略
 - 默认：有界面模式，脚本会停在登录态判断处，等待用户手动登录。
-- 建议：加 `--user-data-dir` 复用登录态，减少反复登录。
+- 首次登录后会复用默认 `chromium_user_data`，后续通常无需重复登录（会话过期除外）。
 
 ## 注意
 - GitHub 页面 class 经常变化，脚本尽量使用 `aria-label`/`data-testid`/可见文本定位。
@@ -88,10 +88,22 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 - 推荐 work_order.json 使用模板 field `id` 作为键。
 
 
-## Driver 获取策略（默认允许网络兜底）
+## Playwright 安装与浏览器缓存策略
 
-- 默认不要求用户预装 driver：若未提供 `--driver-path`，Selenium Manager 可能会自动下载（需要网络）。
-- 若用户环境网络受限，请改为安装本地 chromedriver 并通过 `--driver-path` 指定。
+- 依赖安装后需执行 `python -m playwright install chromium` 下载浏览器。
+- 入口脚本已内置该步骤，并带默认重试（指数退避）。
+- 若下载仍失败，入口脚本会自动尝试回退到系统已安装浏览器（Chrome/Chromium）。
+- 若已准备好浏览器缓存，可设置 `SKIP_PLAYWRIGHT_INSTALL=1` 跳过下载。
+
+## 可选环境变量
+- `SKIP_PLAYWRIGHT_INSTALL=1`：跳过 Playwright 浏览器下载（已预置浏览器缓存时使用）
+- `PAUSE_BEFORE_SUBMIT_SEC=10`：填表后暂停秒数（默认 10）
+- `PYTHON_BIN=python3`：仅 macOS/Linux 下可指定 Python 解释器
+- `PLAYWRIGHT_INSTALL_RETRIES=3`：浏览器下载失败重试次数（默认 3）
+- `PLAYWRIGHT_INSTALL_RETRY_DELAY_SEC=2`：重试基础等待秒数（指数退避）
+- `PLAYWRIGHT_INSTALL_TIMEOUT_SEC=240`：单次浏览器下载超时秒数（默认 240）
+- `BOOTSTRAP_UPGRADE_PIP=1`：需要时才升级 pip（默认不升级，弱网更稳）
+- `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE`：手动覆盖 Playwright 平台（一般不需要；macOS arm64 入口脚本会自动设置）
 
 
 ## 防止重复提交死循环
@@ -105,7 +117,7 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 - `work_order.json`：由 agent 生成，放在你的工作目录（你能看到/回顾）。
 - `artifacts/`：脚本运行产物，默认与 work_order.json 同目录（包含截图、HTML、校验报告等）。
 - `.venv`：在 skill 目录内创建（隔离依赖）。
-- `chrome_user_data`：默认存放在用户配置目录（复用登录态，避免反复登录）。
+- `chromium_user_data`：默认存放在用户配置目录（复用登录态，避免反复登录）。
 
 
 - 日志：`artifacts/run.log`（脚本会把 stdout/stderr tee 到该文件，便于 runner 不显示输出时排查）。

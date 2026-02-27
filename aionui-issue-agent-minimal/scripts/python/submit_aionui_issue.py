@@ -3,27 +3,21 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime
 import json
 import os
 import platform as py_platform
 import re
-import shutil
-import subprocess
 import sys
-import datetime
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import yaml
-
-from selenium import webdriver
-from selenium.common.exceptions import TimeoutException, WebDriverException, SessionNotCreatedException
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 
 
 AIONUI_REPO = "iOfficeAI/AionUi"
@@ -75,6 +69,7 @@ def pick_valid_option(value: str, options: List[str]) -> str:
             return o
     return options[0]
 
+
 def option_matches(value: str, options: List[str]) -> bool:
     v = (value or "").strip().lower()
     if not v or not options:
@@ -125,6 +120,31 @@ def _infer_platform_default() -> str:
             return "macOS (Apple Silicon)"
         return "macOS (Intel)"
     return "Windows"
+
+
+def _apply_playwright_platform_override_for_macos_arm64() -> None:
+    if py_platform.system().lower() != "darwin":
+        return
+    if os.environ.get("PLAYWRIGHT_HOST_PLATFORM_OVERRIDE"):
+        return
+    machine = (py_platform.machine() or "").lower()
+    if machine not in ("arm64", "aarch64"):
+        return
+    try:
+        kernel_major = int((py_platform.release() or "").split(".")[0])
+    except Exception:
+        kernel_major = 24
+    if kernel_major < 18:
+        override = "mac10.13-arm64"
+    elif kernel_major == 18:
+        override = "mac10.14-arm64"
+    elif kernel_major == 19:
+        override = "mac10.15-arm64"
+    else:
+        mac_major = min(max(kernel_major - 9, 11), 15)
+        override = f"mac{mac_major}-arm64"
+    os.environ["PLAYWRIGHT_HOST_PLATFORM_OVERRIDE"] = override
+    print(f"[INFO] Set PLAYWRIGHT_HOST_PLATFORM_OVERRIDE={override} for macOS arm64.")
 
 
 def normalize_work_order_dict(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -215,53 +235,55 @@ def load_work_order(path: Path) -> WorkOrder:
 
 
 # ---------------------------
-# Selenium helpers
+# Playwright helpers
 # ---------------------------
 
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 
-def save_debug(driver, artifacts: Path, prefix: str) -> None:
+def save_debug(page, artifacts: Path, prefix: str) -> None:
     ensure_dir(artifacts)
     ts = int(time.time())
     with contextlib.suppress(Exception):
-        driver.save_screenshot(str(artifacts / f"{prefix}_{ts}.png"))
+        page.screenshot(path=str(artifacts / f"{prefix}_{ts}.png"), full_page=True)
     with contextlib.suppress(Exception):
-        (artifacts / f"{prefix}_{ts}.html").write_text(driver.page_source, encoding="utf-8")
+        (artifacts / f"{prefix}_{ts}.html").write_text(page.content(), encoding="utf-8")
 
 
-def find_control_by_label(driver, label_text: str):
+def _locator_exists(locator) -> bool:
+    with contextlib.suppress(Exception):
+        return locator.count() > 0
+    return False
+
+
+def find_control_by_label(page, label_text: str):
     """
     Stable mapping: label text -> label element -> aria-labelledby token match.
-    Returns (label_el, control_el).
+    Returns (label_locator, control_locator).
     """
-    labs = driver.find_elements(By.XPATH, f"//label[normalize-space(.)={json.dumps(label_text)}]")
-    if not labs:
-        labs = driver.find_elements(By.XPATH, f"//label[contains(normalize-space(.), {json.dumps(label_text)})]")
-    if not labs:
+    lab = page.locator(f"xpath=//label[normalize-space(.)={json.dumps(label_text)}]").first
+    if not _locator_exists(lab):
+        lab = page.locator(f"xpath=//label[contains(normalize-space(.), {json.dumps(label_text)})]").first
+    if not _locator_exists(lab):
         return None, None
 
-    lab = labs[0]
     lid = lab.get_attribute("id")
     if lid:
-        # aria-labelledby often contains multiple IDs; token selector handles that
-        controls = driver.find_elements(By.CSS_SELECTOR, f"[aria-labelledby~='{lid}']")
-        if controls:
-            return lab, controls[0]
+        control = page.locator(f"[aria-labelledby~='{lid}']").first
+        if _locator_exists(control):
+            return lab, control
 
-    # fallback "for"
     tid = lab.get_attribute("for")
     if tid:
-        els = driver.find_elements(By.ID, tid)
-        if els:
-            return lab, els[0]
+        control = page.locator(f"#{tid}").first
+        if _locator_exists(control):
+            return lab, control
 
-    # last resort: next control
     for tag in ["textarea", "input", "button"]:
-        cand = lab.find_elements(By.XPATH, f"following::{tag}[1]")
-        if cand:
-            return lab, cand[0]
+        control = lab.locator(f"xpath=following::{tag}[1]").first
+        if _locator_exists(control):
+            return lab, control
 
     return lab, None
 
@@ -270,19 +292,19 @@ def set_text_control(el, value: str):
     with contextlib.suppress(Exception):
         el.click()
     with contextlib.suppress(Exception):
-        el.clear()
-    el.send_keys(value)
+        el.fill("")
+    el.fill(value)
 
 
 def dropdown_already_selected(control_btn, wanted: str) -> bool:
     try:
-        txt = (control_btn.text or "").strip()
+        txt = (control_btn.text_content() or "").strip()
         return wanted.lower() in txt.lower()
     except Exception:
         return False
 
 
-def select_dropdown_option(driver, wait: WebDriverWait, control_btn, option_text: str) -> bool:
+def select_dropdown_option(page, control_btn, option_text: str) -> bool:
     """
     Select an option from GitHub ActionList dropdown (Issue Forms).
     Strategy:
@@ -299,28 +321,27 @@ def select_dropdown_option(driver, wait: WebDriverWait, control_btn, option_text
     except Exception:
         return False
 
-    # wait menu
     with contextlib.suppress(Exception):
-        wait.until(EC.presence_of_element_located((By.XPATH, "//ul[@role='menu' or @role='listbox']")))
+        page.wait_for_selector("//ul[@role='menu' or @role='listbox']", timeout=5000)
 
-    # prefer role=menuitemradio/option inside the opened menu/listbox
-    items = driver.find_elements(By.XPATH, "//ul[@role='menu' or @role='listbox']//*[@role='menuitemradio' or @role='option']")
+    items = page.locator("//ul[@role='menu' or @role='listbox']//*[@role='menuitemradio' or @role='option']")
     target = None
-    for it in items:
+    for i in range(items.count()):
+        it = items.nth(i)
         t = ""
         with contextlib.suppress(Exception):
-            t = (it.text or "").strip()
+            t = (it.text_content() or "").strip()
         if option_text.lower() in t.lower():
             target = it
             break
 
     if target is None:
-        # fallback global
-        items2 = driver.find_elements(By.XPATH, "//*[@role='menuitemradio' or @role='option']")
-        for it in items2:
+        items2 = page.locator("//*[@role='menuitemradio' or @role='option']")
+        for i in range(items2.count()):
+            it = items2.nth(i)
             t = ""
             with contextlib.suppress(Exception):
-                t = (it.text or "").strip()
+                t = (it.text_content() or "").strip()
             if option_text.lower() in t.lower():
                 target = it
                 break
@@ -329,42 +350,40 @@ def select_dropdown_option(driver, wait: WebDriverWait, control_btn, option_text
         return False
 
     with contextlib.suppress(Exception):
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", target)
+        target.scroll_into_view_if_needed()
 
     try:
         target.click()
     except Exception:
         return False
 
-    # wait button text updates OR menu closes
     end = time.time() + 5
     while time.time() < end:
         if dropdown_already_selected(control_btn, option_text):
             return True
         exp = (control_btn.get_attribute("aria-expanded") or "").lower()
         if exp == "false":
-            # menu closed; accept
             return dropdown_already_selected(control_btn, option_text) or True
         time.sleep(0.1)
     return dropdown_already_selected(control_btn, option_text)
 
 
-def is_issue_form_ready(driver) -> bool:
-    return bool(driver.find_elements(By.CSS_SELECTOR, "input[aria-label='Add a title']"))
+def is_issue_form_ready(page) -> bool:
+    return _locator_exists(page.locator("input[aria-label='Add a title']"))
 
 
-def is_login_page(driver) -> bool:
-    url = (driver.current_url or "").lower()
+def is_login_page(page) -> bool:
+    url = (page.url or "").lower()
     if "/login" in url or "/session" in url:
         return True
-    if driver.find_elements(By.XPATH, "//input[@name='login']"):
+    if _locator_exists(page.locator("input[name='login']")):
         return True
-    if driver.find_elements(By.XPATH, "//h1[contains(., 'Sign in')] | //h1[contains(., 'Sign in to GitHub')]"):
+    if _locator_exists(page.locator("xpath=//h1[contains(., 'Sign in')] | //h1[contains(., 'Sign in to GitHub')]")):
         return True
     return False
 
 
-def wait_until_issue_form_ready(driver, template_url: str, login_wait_sec: int) -> None:
+def wait_until_issue_form_ready(page, template_url: str, login_wait_sec: int) -> None:
     """
     Business-stable flow:
       - open template_url
@@ -376,32 +395,31 @@ def wait_until_issue_form_ready(driver, template_url: str, login_wait_sec: int) 
     printed_login_hint = False
 
     while time.time() < deadline:
-        if is_issue_form_ready(driver):
+        if is_issue_form_ready(page):
             return
 
-        if is_login_page(driver):
+        if is_login_page(page):
             if not printed_login_hint:
                 print("Not logged in. Please complete GitHub login in the opened browser window...")
                 printed_login_hint = True
             time.sleep(0.5)
             continue
 
-        # neither ready nor login page — maybe redirected elsewhere after login; go back to template
         with contextlib.suppress(Exception):
-            driver.get(template_url)
+            page.goto(template_url, wait_until="domcontentloaded")
         time.sleep(0.8)
 
-    raise TimeoutException("Timed out waiting for issue form (login + page load).")
+    raise PlaywrightTimeoutError("Timed out waiting for issue form (login + page load).")
 
 
 def is_issue_created_url(url: str) -> bool:
     return bool(re.search(r"/issues/\d+(?:$|[/?#])", url or ""))
 
 
-
 def _extract_issue_number_from_url(url: str) -> str:
     m = re.search(r"/issues/(\d+)(?:$|[/?#])", url or "")
     return m.group(1) if m else ""
+
 
 def _write_back_defaults_if_needed(path: Path, updates: Dict[str, Any]) -> None:
     """
@@ -459,7 +477,6 @@ def preflight_validate_required(tpl: dict, norm: Dict[str, Any], out_dir: Path, 
         if not required:
             continue
         val = norm.get(fid, "")
-        # dropdowns: treat empty as missing (will be defaulted later by normalize rules, but enforce now)
         if fid == "platform" and not str(val).strip():
             val = _infer_platform_default()
         if fid == "actual_behavior" and not str(val).strip():
@@ -483,6 +500,7 @@ def preflight_validate_required(tpl: dict, norm: Dict[str, Any], out_dir: Path, 
             print(f" - {m['label']} (id={m['id']}, type={m['type']})")
         raise SystemExit(2)
 
+
 def apply_template_defaults(tpl: dict, norm: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Apply safe defaults/coercions so platform/version/actual_behavior don't block submission.
@@ -504,8 +522,6 @@ def apply_template_defaults(tpl: dict, norm: Dict[str, Any]) -> Tuple[Dict[str, 
                 out["platform"] = chosen
                 updates["platform"] = chosen
             else:
-                # Keep user-provided platform even if it differs from inferred,
-                # but if it's not in template options, coerce to inferred/first option.
                 if options_list and not option_matches(str(value), options_list):
                     inferred = _infer_platform_default()
                     chosen = inferred if option_matches(inferred, options_list) else pick_valid_option("", options_list)
@@ -563,6 +579,7 @@ def _enable_run_logging(artifacts_dir: Path) -> None:
     sys.stdout = _Tee(sys.__stdout__, f)
     sys.stderr = _Tee(sys.__stderr__, f)
 
+
 # ---------------------------
 # CLI
 # ---------------------------
@@ -571,13 +588,12 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Auto-submit GitHub issue to iOfficeAI/AionUi (YAML-driven Issue Forms).")
     p.add_argument("--work-order", required=False, help="Path to work_order.json")
     p.add_argument("--work-order-file", required=False, help="Alias of --work-order")
-    p.add_argument("--headless", action="store_true", help="Run Chrome headless")
+    p.add_argument("--headless", action="store_true", help="Run browser headless")
     p.add_argument("--timeout-sec", type=int, default=30, help="Element wait timeout seconds")
     p.add_argument("--login-wait-sec", type=int, default=600, help="Max seconds to wait for manual login")
-    p.add_argument("--browser-binary", default=None, help="Path to Chrome/Chromium binary if needed")
-    p.add_argument("--driver-path", default=None, help="Path to chromedriver; if omitted, Selenium Manager may auto-download (requires network).")
-    p.add_argument("--user-data-dir", default=None, help="Chrome user data dir to reuse login state")
-    p.add_argument("--profile-dir", default=None, help="Chrome profile dir name inside user-data-dir")
+    p.add_argument("--browser-binary", default=None, help="Path to Chromium/Chrome binary if needed")
+    p.add_argument("--user-data-dir", default=None, help="Chromium user data dir to reuse login state")
+    p.add_argument("--profile-dir", default=None, help="Profile dir name inside user-data-dir")
     p.add_argument("--artifacts-dir", default="artifacts", help="Where to write debug artifacts")
     p.add_argument("--no-submit", action="store_true", help="Fill form but DO NOT click Create")
     p.add_argument("--pause-before-submit-sec", type=int, default=10, help="Pause after filling, before clicking Create")
@@ -586,6 +602,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    _apply_playwright_platform_override_for_macos_arm64()
     args = parse_args()
     if not args.work_order and args.work_order_file:
         args.work_order = args.work_order_file
@@ -593,12 +610,10 @@ def main() -> int:
         raise SystemExit("Missing: --work-order (or --work-order-file)")
 
     work_order_path = Path(args.work_order)
-    # Resolve artifacts directory next to work_order.json (not inside skill folder)
     artifacts = Path(args.artifacts_dir)
     if not artifacts.is_absolute():
         artifacts = work_order_path.parent / artifacts
     _enable_run_logging(artifacts)
-    # Prevent resubmission loop: if issue_number already present, exit.
     try:
         _pre = json.loads(work_order_path.read_text(encoding='utf-8'))
         if not args.force:
@@ -617,7 +632,6 @@ def main() -> int:
         pass
 
     wo = load_work_order(work_order_path)
-    # Warn only for bug template (feature template doesn't have platform field).
     try:
         if wo.issue_type == "bug":
             inferred_platform = _infer_platform_default()
@@ -631,187 +645,181 @@ def main() -> int:
     except Exception:
         pass
 
-    # Default user-data-dir under user config dir to reduce repeated login.
     if not args.user_data_dir:
-        # Persistent profile outside skill folder to avoid re-login and keep work outputs clean
         home = Path.home()
         if py_platform.system().lower().startswith('windows'):
             lad = os.environ.get('LOCALAPPDATA')
             base_dir = Path(lad) if lad else (home / '.aionui')
         else:
             base_dir = Path(os.environ.get('XDG_CONFIG_HOME', str(home / '.config')))
-        args.user_data_dir = str(base_dir / 'AionUi' / 'chrome_user_data')
+        args.user_data_dir = str(base_dir / 'AionUi' / 'chromium_user_data')
     ensure_dir(Path(args.user_data_dir))
 
-    options = webdriver.ChromeOptions()
-    if args.headless:
-        options.add_argument("--headless=new")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1280,900")
+    assets_templates_dir = Path(__file__).resolve().parents[2] / "assets" / "templates"
+    template_filename, template_path = template_for_issue_type(wo.issue_type, assets_templates_dir)
+    template_url = f"{wo.project_url}/issues/new?template={template_filename}"
 
-    options.add_argument(f"--user-data-dir={args.user_data_dir}")
-    if args.profile_dir:
-        options.add_argument(f"--profile-directory={args.profile_dir}")
+    raw_payload = json.loads(work_order_path.read_text(encoding="utf-8"))
+    norm = normalize_work_order_dict(raw_payload)
+    tpl = load_issue_template(template_path)
+    template_field_ids = {str(f.get("id")) for f in all_fields_from_template(tpl) if f.get("id")}
+    wb: Dict[str, Any] = {}
+    raw_platform = str(raw_payload.get("platform") or "").strip()
+    if "platform" in template_field_ids and (not raw_platform or raw_platform.lower() in ("auto", "detect")):
+        wb["platform"] = norm.get("platform", _infer_platform_default())
+    if "actual_behavior" in template_field_ids and not str(raw_payload.get("actual_behavior") or "").strip():
+        ab = str(norm.get("actual_behavior") or "")
+        if ab.strip():
+            wb["actual_behavior"] = ab
 
-    if args.browser_binary:
-        options.binary_location = args.browser_binary
+    norm, wb2 = apply_template_defaults(tpl, norm)
+    wb.update(wb2)
+    _write_back_defaults_if_needed(work_order_path, wb)
+    preflight_validate_required(tpl, norm, artifacts, wo.issue_type)
 
-    service = ChromeService(executable_path=args.driver_path) if args.driver_path else None
-
-    driver = None
+    page = None
+    context = None
     try:
-        # NOTE: If driver_path not provided, Selenium Manager may download a driver (requires network).
-        driver = webdriver.Chrome(options=options, service=service)
-        wait = WebDriverWait(driver, args.timeout_sec)
+        with sync_playwright() as p:
+            browser_args = [
+                "--disable-gpu",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--window-size=1280,900",
+            ]
+            if args.profile_dir:
+                browser_args.append(f"--profile-directory={args.profile_dir}")
 
-        assets_templates_dir = Path(__file__).resolve().parents[2] / "assets" / "templates"
-        template_filename, template_path = template_for_issue_type(wo.issue_type, assets_templates_dir)
+            context = p.chromium.launch_persistent_context(
+                args.user_data_dir,
+                headless=args.headless,
+                args=browser_args,
+                viewport={"width": 1280, "height": 900},
+                executable_path=args.browser_binary or None,
+            )
+            context.set_default_timeout(args.timeout_sec * 1000)
+            page = context.pages[0] if context.pages else context.new_page()
 
-        template_url = f"{wo.project_url}/issues/new?template={template_filename}"
+            page.goto(template_url, wait_until="domcontentloaded")
+            wait_until_issue_form_ready(page, template_url, login_wait_sec=args.login_wait_sec)
 
-        # Preflight: validate work_order.json required fields against YAML template
-        raw_payload = json.loads(work_order_path.read_text(encoding="utf-8"))
-        norm = normalize_work_order_dict(raw_payload)
-        tpl = load_issue_template(template_path)
-        template_field_ids = {str(f.get("id")) for f in all_fields_from_template(tpl) if f.get("id")}
-        wb: Dict[str, Any] = {}
-        # If user didn't specify these (or used "auto"), write back the auto-defaults to work_order.json.
-        raw_platform = str(raw_payload.get("platform") or "").strip()
-        if "platform" in template_field_ids and (not raw_platform or raw_platform.lower() in ("auto", "detect")):
-            wb["platform"] = norm.get("platform", _infer_platform_default())
-        if "actual_behavior" in template_field_ids and not str(raw_payload.get("actual_behavior") or "").strip():
-            ab = str(norm.get("actual_behavior") or "")
-            if ab.strip():
-                wb["actual_behavior"] = ab
+            title_input = page.locator("input[aria-label='Add a title']").first
+            title_input.fill("")
+            title_input.fill(wo.title)
 
-        norm, wb2 = apply_template_defaults(tpl, norm)
-        wb.update(wb2)
-        _write_back_defaults_if_needed(work_order_path, wb)
-        preflight_validate_required(tpl, norm, artifacts, wo.issue_type)
+            missing_required: List[str] = []
 
-        # 1) Open template url
-        driver.get(template_url)
+            for field in all_fields_from_template(tpl):
+                fid = field.get("id")
+                ftype = field_type(field)
+                flabel = field_label(field)
+                required = bool((field.get("validations", {}) or {}).get("required", False))
+                options_list = field_options(field)
 
-        # 2) Wait for login/form ready
-        wait_until_issue_form_ready(driver, template_url, login_wait_sec=args.login_wait_sec)
+                value = norm.get(fid, "")
 
-        # 3) Title
-        title_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[aria-label='Add a title']")))
-        title_input.clear()
-        title_input.send_keys(wo.title)
-
-        # 4) YAML-driven fill
-
-        missing_required: List[str] = []
-
-        for field in all_fields_from_template(tpl):
-            fid = field.get("id")
-            ftype = field_type(field)
-            flabel = field_label(field)
-            required = bool((field.get("validations", {}) or {}).get("required", False))
-            options_list = field_options(field)
-
-            value = norm.get(fid, "")
-
-            # Per-template fallbacks
-            if fid == "platform":
-                value = pick_valid_option(str(value or wo.platform or _infer_platform_default()), options_list)
-            if fid == "feature_category":
-                value = pick_valid_option(str(value), options_list)
-            if fid == "actual_behavior" and not str(value).strip():
-                value = norm.get("bug_description", "")
-
-            lab, control = find_control_by_label(driver, flabel)
-            if control is None:
-                if required:
-                    missing_required.append(f"{flabel} (id={fid}, type={ftype}) [control not found]")
-                continue
-
-            ok = False
-            try:
-                if ftype == "dropdown":
+                if fid == "platform":
+                    value = pick_valid_option(str(value or wo.platform or _infer_platform_default()), options_list)
+                if fid == "feature_category":
                     value = pick_valid_option(str(value), options_list)
-                    ok = select_dropdown_option(driver, wait, control, value)
-                elif ftype in ("input", "textarea"):
-                    set_text_control(control, str(value))
-                    ok = bool(str(value).strip())
-                else:
-                    # best-effort text
-                    set_text_control(control, str(value))
-                    ok = bool(str(value).strip())
-            except Exception:
+                if fid == "actual_behavior" and not str(value).strip():
+                    value = norm.get("bug_description", "")
+
+                lab, control = find_control_by_label(page, flabel)
+                if control is None:
+                    if required:
+                        missing_required.append(f"{flabel} (id={fid}, type={ftype}) [control not found]")
+                    continue
+
                 ok = False
+                try:
+                    if ftype == "dropdown":
+                        value = pick_valid_option(str(value), options_list)
+                        ok = select_dropdown_option(page, control, value)
+                    elif ftype in ("input", "textarea"):
+                        set_text_control(control, str(value))
+                        ok = bool(str(value).strip())
+                    else:
+                        set_text_control(control, str(value))
+                        ok = bool(str(value).strip())
+                except Exception:
+                    ok = False
 
-            if required and not ok:
-                missing_required.append(f"{flabel} (id={fid}, type={ftype})")
+                if required and not ok:
+                    missing_required.append(f"{flabel} (id={fid}, type={ftype})")
 
-        if missing_required:
-            print("ERROR: Missing required fields or failed to fill:")
-            for m in missing_required:
-                print(" -", m)
-            save_debug(driver, artifacts, "missing_required")
-            raise SystemExit("Missing required fields; see artifacts for details.")
+            if missing_required:
+                print("ERROR: Missing required fields or failed to fill:")
+                for m in missing_required:
+                    print(" -", m)
+                save_debug(page, artifacts, "missing_required")
+                raise SystemExit("Missing required fields; see artifacts for details.")
 
-        # 5) Pause to let user confirm (requested)
-        pause = max(0, int(args.pause_before_submit_sec))
-        if pause > 0 and not args.headless:
-            print(f"Filled all fields. Pausing {pause}s before submit for review...")
-            time.sleep(pause)
+            pause = max(0, int(args.pause_before_submit_sec))
+            if pause > 0 and not args.headless:
+                print(f"Filled all fields. Pausing {pause}s before submit for review...")
+                time.sleep(pause)
 
-        if args.no_submit:
-            print("NO-SUBMIT: filled the form but will not click Create.")
-            save_debug(driver, artifacts, "no_submit")
-            return 0
+            if args.no_submit:
+                print("NO-SUBMIT: filled the form but will not click Create.")
+                save_debug(page, artifacts, "no_submit")
+                return 0
 
-        # 6) Submit with retries
-        max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
-            try:
-                btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='create-issue-button']")))
-                btn.click()
-            except Exception as e:
-                print(f"Attempt {attempt}: failed to click Create: {e}")
-                save_debug(driver, artifacts, f"create_click_fail_{attempt}")
-                continue
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    btn = page.locator("button[data-testid='create-issue-button']").first
+                    btn.click()
+                except Exception as e:
+                    print(f"Attempt {attempt}: failed to click Create: {e}")
+                    save_debug(page, artifacts, f"create_click_fail_{attempt}")
+                    continue
 
-            # wait for navigation
-            for _ in range(40):  # ~20s
-                time.sleep(0.5)
-                cur = driver.current_url or ""
-                if is_issue_created_url(cur):
-                    print(f"SUCCESS: {cur}")
-                    _update_work_order_file(work_order_path, cur)
-                    # Post-submit wait to improve UX / allow final validation
-                    if not args.headless:
-                        time.sleep(10)
-                    return 0
+                for _ in range(40):
+                    time.sleep(0.5)
+                    cur = page.url or ""
+                    if is_issue_created_url(cur):
+                        print(f"SUCCESS: {cur}")
+                        _update_work_order_file(work_order_path, cur)
+                        if not args.headless:
+                            time.sleep(10)
+                        return 0
 
-            save_debug(driver, artifacts, f"submit_attempt_{attempt}")
-            print(f"Attempt {attempt}: still on create page (validation may have failed). Retrying...")
+                save_debug(page, artifacts, f"submit_attempt_{attempt}")
+                print(f"Attempt {attempt}: still on create page (validation may have failed). Retrying...")
 
-        raise SystemExit("Failed to submit after 3 attempts. See artifacts/*.png and *.html for details.")
+            raise SystemExit("Failed to submit after 3 attempts. See artifacts/*.png and *.html for details.")
 
-    except SessionNotCreatedException as e:
-        save_debug(driver, artifacts, "session_not_created") if driver else None
-        raise SystemExit(
-            "ChromeDriver 无法创建会话（常见原因：Chrome 与 ChromeDriver 主版本不匹配）。"
-            " 解决：安装匹配版本的 ChromeDriver 并用 --driver-path 指定；或更新 Chrome。"
-        ) from e
-    except TimeoutException as e:
-        save_debug(driver, artifacts, "timeout") if driver else None
+    except PlaywrightTimeoutError as e:
+        save_debug(page, artifacts, "timeout") if page else None
         raise SystemExit(f"Timeout waiting for element/state: {e}") from e
-    except WebDriverException as e:
-        save_debug(driver, artifacts, "webdriver_error") if driver else None
+    except PlaywrightError as e:
+        save_debug(page, artifacts, "browser_error") if page else None
+        err_text = str(e)
+        print(f"[ERROR] Playwright detail: {err_text}")
+        if "Executable doesn't exist" in err_text:
+            print(
+                "[HINT] Browser executable path mismatch. "
+                "Try reinstalling browsers: `python -m playwright install chromium`."
+            )
+            if py_platform.system().lower() == "darwin" and (py_platform.machine() or "").lower() in ("arm64", "aarch64"):
+                print(
+                    "[HINT] On macOS arm64, if runtime resolves to mac-x64 path, "
+                    "set `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=mac15-arm64` before running."
+                )
+        if "bootstrap_check_in" in err_text and "Permission denied (1100)" in err_text:
+            print(
+                "[HINT] Browser launch is blocked by current runtime permissions/sandbox. "
+                "Run in a normal terminal session or switch to MCP submission path."
+            )
         raise SystemExit(
-            "WebDriver 启动失败：可能未安装/未找到 ChromeDriver，或网络受限导致 Selenium Manager 无法下载 driver。"
-            " 解决：提供 --driver-path（推荐），或确保网络可用以便自动下载。"
+            "Playwright 启动/运行失败：可能未安装浏览器或依赖不足。"
+            " 解决：先运行 `python -m playwright install chromium`，必要时补齐系统依赖或改用 MCP。"
         ) from e
     finally:
         with contextlib.suppress(Exception):
-            if driver:
-                driver.quit()
+            if context:
+                context.close()
 
 
 if __name__ == "__main__":
