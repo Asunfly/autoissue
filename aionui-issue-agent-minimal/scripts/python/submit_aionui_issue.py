@@ -19,6 +19,17 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+from issue_payload_support import (
+    append_work_order_event,
+    build_local_attachment_markdown,
+    ensure_work_order_runtime,
+    filter_uploadable_attachments,
+    merge_markdown_blocks,
+    resolve_attachment_paths,
+    update_work_order_runtime,
+    write_work_order_updates,
+)
+
 
 AIONUI_REPO = "iOfficeAI/AionUi"
 AIONUI_URL = "https://github.com/iOfficeAI/AionUi"
@@ -296,6 +307,113 @@ def set_text_control(el, value: str):
     el.fill(value)
 
 
+def get_text_control_value(el) -> str:
+    with contextlib.suppress(Exception):
+        return str(el.input_value() or "")
+    with contextlib.suppress(Exception):
+        return str(el.text_content() or "")
+    return ""
+
+
+def _extract_uploaded_attachment_markdown(before: str, after: str) -> str:
+    before = (before or "").strip()
+    after = (after or "").strip()
+    if not after:
+        return ""
+    if before and after.startswith(before):
+        return after[len(before):].strip()
+
+    lines = []
+    for line in after.splitlines():
+        text = line.strip()
+        if text.startswith("<!-- Uploading "):
+            continue
+        if "http" not in text:
+            continue
+        if "![" in text or "](" in text or ("<img" in text and "src=" in text):
+            lines.append(text)
+    return "\n".join(lines).strip()
+
+
+def find_attachment_input_for_control(control):
+    with contextlib.suppress(Exception):
+        handle = control.evaluate_handle(
+            """(el) => {
+                const selectors = [
+                    'file-attachment input[type="file"]',
+                    'input[type="file"].manual-file-chooser',
+                    'input[type="file"].js-manual-file-chooser',
+                    'input[type="file"]'
+                ];
+                let node = el;
+                for (let depth = 0; depth < 8 && node; depth += 1, node = node.parentElement) {
+                    for (const selector of selectors) {
+                        const found = node.querySelector(selector);
+                        if (found) return found;
+                    }
+                }
+                const form = el.closest('form') || document;
+                for (const selector of selectors) {
+                    const found = form.querySelectorAll(selector);
+                    if (found.length) return found[found.length - 1];
+                }
+                return null;
+            }"""
+        )
+        element = handle.as_element()
+        if element:
+            return element
+    return None
+
+
+def find_attachment_button_for_control(control):
+    candidates = [
+        "xpath=ancestor::fieldset[1]//button[contains(., 'Add Files')]",
+        "xpath=ancestor::div[contains(@class, 'ElementWrapper')][1]//button[contains(., 'Add Files')]",
+        "xpath=ancestor::form[1]//button[contains(., 'Add Files')]",
+    ]
+    for selector in candidates:
+        with contextlib.suppress(Exception):
+            btn = control.locator(selector).first
+            if _locator_exists(btn):
+                return btn
+    return None
+
+
+def upload_attachments_to_control(page, control, attachment_paths: List[Path], timeout_sec: int) -> Tuple[str, str]:
+    if not attachment_paths:
+        return get_text_control_value(control), ""
+
+    before = get_text_control_value(control)
+    file_input = find_attachment_input_for_control(control)
+    if file_input is not None:
+        with contextlib.suppress(Exception):
+            file_input.set_input_files([str(path) for path in attachment_paths])
+    else:
+        upload_button = find_attachment_button_for_control(control)
+        if upload_button is None:
+            raise PlaywrightError("Could not find file input or Add Files button for attachment upload.")
+        with page.expect_file_chooser(timeout=max(5000, timeout_sec * 1000)) as chooser_info:
+            upload_button.click()
+        chooser_info.value.set_files([str(path) for path in attachment_paths])
+
+    deadline = time.time() + max(30, timeout_sec)
+    after = before
+    while time.time() < deadline:
+        time.sleep(0.5)
+        after = get_text_control_value(control)
+        lower_after = after.lower()
+        if after != before and (
+            "user-attachments" in lower_after
+            or "<img" in lower_after
+            or "](" in lower_after
+            or "![" in lower_after
+        ):
+            break
+
+    return after, _extract_uploaded_attachment_markdown(before, after)
+
+
 def dropdown_already_selected(control_btn, wanted: str) -> bool:
     try:
         txt = (control_btn.text_content() or "").strip()
@@ -565,7 +683,7 @@ class _Tee:
                 pass
 
 
-def _enable_run_logging(artifacts_dir: Path) -> None:
+def _enable_run_logging(artifacts_dir: Path):
     """
     Tee stdout/stderr to artifacts/run.log so users can debug even if runner doesn't capture console output.
     """
@@ -576,8 +694,23 @@ def _enable_run_logging(artifacts_dir: Path) -> None:
     f.write("\n" + "="*80 + "\n")
     f.write(f"[{ts}] run started\n")
     f.flush()
+    prev_stdout = sys.stdout
+    prev_stderr = sys.stderr
     sys.stdout = _Tee(sys.__stdout__, f)
     sys.stderr = _Tee(sys.__stderr__, f)
+    return prev_stdout, prev_stderr, f
+
+
+def _disable_run_logging(state) -> None:
+    if not state:
+        return
+    prev_stdout, prev_stderr, log_file = state
+    sys.stdout = prev_stdout
+    sys.stderr = prev_stderr
+    with contextlib.suppress(Exception):
+        log_file.flush()
+    with contextlib.suppress(Exception):
+        log_file.close()
 
 
 # ---------------------------
@@ -596,6 +729,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--profile-dir", default=None, help="Profile dir name inside user-data-dir")
     p.add_argument("--artifacts-dir", default="artifacts", help="Where to write debug artifacts")
     p.add_argument("--no-submit", action="store_true", help="Fill form but DO NOT click Create")
+    p.add_argument(
+        "--prepare-attachments-only",
+        action="store_true",
+        help="Upload work_order.attachments into Additional Context and write attachment_markdown back, but do not create issue",
+    )
     p.add_argument("--pause-before-submit-sec", type=int, default=10, help="Pause after filling, before clicking Create")
     p.add_argument("--force", action="store_true", help="Ignore existing issue_number/issue_url and submit anyway")
     return p.parse_args()
@@ -613,15 +751,43 @@ def main() -> int:
     artifacts = Path(args.artifacts_dir)
     if not artifacts.is_absolute():
         artifacts = work_order_path.parent / artifacts
-    _enable_run_logging(artifacts)
+    ensure_work_order_runtime(work_order_path)
+    update_work_order_runtime(
+        work_order_path,
+        {
+            "workspace_dir": str(work_order_path.parent.resolve()),
+            "artifacts_dir": str(artifacts.resolve()),
+            "last_submitter": "skill",
+            "last_run_log": str((artifacts / "run.log").resolve()),
+        },
+    )
+    log_state = _enable_run_logging(artifacts)
     try:
         _pre = json.loads(work_order_path.read_text(encoding='utf-8'))
-        if not args.force:
+        if not args.force and not args.prepare_attachments_only:
             existing_issue_number = str(_pre.get('issue_number') or '').strip()
             existing_issue_url = str(_pre.get('issue_url') or '').strip()
             if not existing_issue_number and existing_issue_url:
                 existing_issue_number = _extract_issue_number_from_url(existing_issue_url)
             if existing_issue_number or existing_issue_url:
+                update_work_order_runtime(
+                    work_order_path,
+                    {
+                        "status": "skipped_duplicate",
+                        "last_error": "",
+                        "last_error_at": "",
+                    },
+                )
+                append_work_order_event(
+                    work_order_path,
+                    stage="submit",
+                    status="skipped_duplicate",
+                    submitter="skill",
+                    message="Skip because issue_number/issue_url already exists in work_order.json.",
+                    issue_url=existing_issue_url,
+                    issue_number=existing_issue_number,
+                    artifacts_dir=str(artifacts.resolve()),
+                )
                 msg = f"work_order.json already has issue_number={existing_issue_number!r}" if existing_issue_number else "work_order.json already has issue_url"
                 print(f"{msg}, skip submission.")
                 if existing_issue_url:
@@ -662,6 +828,14 @@ def main() -> int:
     raw_payload = json.loads(work_order_path.read_text(encoding="utf-8"))
     norm = normalize_work_order_dict(raw_payload)
     tpl = load_issue_template(template_path)
+    attachment_paths, missing_attachment_paths = resolve_attachment_paths(norm.get("attachments", []), work_order_path.parent)
+    uploadable_attachment_paths, skipped_attachment_paths = filter_uploadable_attachments(attachment_paths)
+    attachment_markdown = str(raw_payload.get("attachment_markdown") or "").strip()
+    local_attachment_markdown = build_local_attachment_markdown(
+        attachment_paths,
+        missing_attachment_paths,
+        skipped_attachment_paths,
+    )
     template_field_ids = {str(f.get("id")) for f in all_fields_from_template(tpl) if f.get("id")}
     wb: Dict[str, Any] = {}
     raw_platform = str(raw_payload.get("platform") or "").strip()
@@ -676,6 +850,32 @@ def main() -> int:
     wb.update(wb2)
     _write_back_defaults_if_needed(work_order_path, wb)
     preflight_validate_required(tpl, norm, artifacts, wo.issue_type)
+    runtime_snapshot = ensure_work_order_runtime(work_order_path)
+    runtime = runtime_snapshot.get("runtime", {})
+    update_work_order_runtime(
+        work_order_path,
+        {
+            "status": "preparing_attachments" if args.prepare_attachments_only else "submitting",
+            "attempt_count": int(runtime.get("attempt_count") or 0) + 1,
+            "prepare_count": int(runtime.get("prepare_count") or 0) + (1 if args.prepare_attachments_only else 0),
+            "submission_count": int(runtime.get("submission_count") or 0) + (0 if args.prepare_attachments_only else 1),
+            "last_error": "",
+            "last_error_at": "",
+        },
+    )
+    append_work_order_event(
+        work_order_path,
+        stage="prepare_attachments" if args.prepare_attachments_only else "submit",
+        status="started",
+        submitter="skill",
+        message="Launch Playwright submission flow.",
+        artifacts_dir=str(artifacts.resolve()),
+        extra={
+            "prepare_attachments_only": args.prepare_attachments_only,
+            "headless": args.headless,
+            "skipped_attachments": skipped_attachment_paths,
+        },
+    )
 
     page = None
     context = None
@@ -708,6 +908,7 @@ def main() -> int:
             title_input.fill(wo.title)
 
             missing_required: List[str] = []
+            attachment_updates: Dict[str, Any] = {}
 
             for field in all_fields_from_template(tpl):
                 fid = field.get("id")
@@ -736,6 +937,44 @@ def main() -> int:
                     if ftype == "dropdown":
                         value = pick_valid_option(str(value), options_list)
                         ok = select_dropdown_option(page, control, value)
+                    elif fid == "additional_context":
+                        base_text = str(value or "")
+                        combined_text = merge_markdown_blocks(base_text, attachment_markdown)
+                        set_text_control(control, combined_text)
+                        ok = True
+
+                        if attachment_markdown:
+                            attachment_updates["attachment_upload_status"] = "uploaded"
+                        elif uploadable_attachment_paths:
+                            _, uploaded_markdown = upload_attachments_to_control(
+                                page,
+                                control,
+                                uploadable_attachment_paths,
+                                timeout_sec=max(args.timeout_sec * 2, 60),
+                            )
+                            if uploaded_markdown:
+                                attachment_markdown = uploaded_markdown
+                                attachment_updates["attachment_markdown"] = uploaded_markdown
+                                attachment_updates["attachment_upload_status"] = "uploaded"
+                                norm["attachment_markdown"] = uploaded_markdown
+                                norm["additional_context"] = base_text
+                            else:
+                                fallback_text = merge_markdown_blocks(base_text, local_attachment_markdown)
+                                set_text_control(control, fallback_text)
+                                attachment_updates["attachment_upload_status"] = "listed_local"
+                                attachment_updates["attachment_markdown"] = ""
+                                norm["additional_context"] = fallback_text
+                                ok = bool(fallback_text.strip()) or not required
+                            ok = ok and bool(get_text_control_value(control).strip() or not required)
+                        elif attachment_paths or missing_attachment_paths or skipped_attachment_paths:
+                            fallback_text = merge_markdown_blocks(base_text, local_attachment_markdown)
+                            set_text_control(control, fallback_text)
+                            attachment_updates["attachment_upload_status"] = "listed_local"
+                            attachment_updates["attachment_markdown"] = ""
+                            norm["additional_context"] = fallback_text
+                            ok = bool(fallback_text.strip()) or not required
+                        else:
+                            ok = bool(combined_text.strip()) or not required
                     elif ftype in ("input", "textarea"):
                         set_text_control(control, str(value))
                         ok = bool(str(value).strip())
@@ -743,24 +982,117 @@ def main() -> int:
                         set_text_control(control, str(value))
                         ok = bool(str(value).strip())
                 except Exception:
-                    ok = False
+                    if fid == "additional_context" and (attachment_paths or missing_attachment_paths or skipped_attachment_paths):
+                        fallback_text = merge_markdown_blocks(str(value or ""), local_attachment_markdown)
+                        with contextlib.suppress(Exception):
+                            set_text_control(control, fallback_text)
+                        attachment_updates["attachment_upload_status"] = "upload_failed"
+                        attachment_updates["attachment_markdown"] = ""
+                        ok = bool(fallback_text.strip()) or not required
+                    else:
+                        ok = False
 
                 if required and not ok:
                     missing_required.append(f"{flabel} (id={fid}, type={ftype})")
 
+            if attachment_updates:
+                write_work_order_updates(work_order_path, attachment_updates)
+
             if missing_required:
+                update_work_order_runtime(
+                    work_order_path,
+                    {
+                        "status": "failed",
+                        "last_error": "Missing required fields; see artifacts for details.",
+                        "last_error_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat(),
+                    },
+                )
+                append_work_order_event(
+                    work_order_path,
+                    stage="validation",
+                    status="failed",
+                    submitter="skill",
+                    error="Missing required fields or failed to fill form controls.",
+                    artifacts_dir=str(artifacts.resolve()),
+                    extra={"missing_required": missing_required},
+                )
                 print("ERROR: Missing required fields or failed to fill:")
                 for m in missing_required:
                     print(" -", m)
                 save_debug(page, artifacts, "missing_required")
                 raise SystemExit("Missing required fields; see artifacts for details.")
 
+            if args.prepare_attachments_only and uploadable_attachment_paths and attachment_updates.get("attachment_upload_status") != "uploaded":
+                update_work_order_runtime(
+                    work_order_path,
+                    {
+                        "status": "attachment_prepare_failed",
+                        "last_error": "Attachment preparation did not produce uploaded markdown.",
+                        "last_error_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat(),
+                    },
+                )
+                append_work_order_event(
+                    work_order_path,
+                    stage="prepare_attachments",
+                    status="failed",
+                    submitter="skill",
+                    error="Attachment preparation did not produce uploaded markdown.",
+                    artifacts_dir=str(artifacts.resolve()),
+                    extra={
+                        "attachment_upload_status": attachment_updates.get("attachment_upload_status", ""),
+                        "skipped_attachments": skipped_attachment_paths,
+                    },
+                )
+                save_debug(page, artifacts, "prepare_attachments_failed")
+                raise SystemExit("Attachment preparation did not produce uploaded markdown. See artifacts for details.")
+
             pause = max(0, int(args.pause_before_submit_sec))
             if pause > 0 and not args.headless:
                 print(f"Filled all fields. Pausing {pause}s before submit for review...")
                 time.sleep(pause)
 
+            if args.prepare_attachments_only:
+                update_work_order_runtime(
+                    work_order_path,
+                    {
+                        "status": "attachments_prepared",
+                        "last_error": "",
+                        "last_error_at": "",
+                    },
+                )
+                append_work_order_event(
+                    work_order_path,
+                    stage="prepare_attachments",
+                    status="succeeded",
+                    submitter="skill",
+                    message="Attachment markdown prepared and written back to work_order.json.",
+                    artifacts_dir=str(artifacts.resolve()),
+                    extra={
+                        "attachment_upload_status": attachment_updates.get("attachment_upload_status", ""),
+                        "skipped_attachments": skipped_attachment_paths,
+                    },
+                )
+                print("PREPARE-ATTACHMENTS-ONLY: attachment markdown prepared, issue not submitted.")
+                save_debug(page, artifacts, "prepare_attachments_only")
+                return 0
+
             if args.no_submit:
+                update_work_order_runtime(
+                    work_order_path,
+                    {
+                        "status": "filled_no_submit",
+                        "last_error": "",
+                        "last_error_at": "",
+                    },
+                )
+                append_work_order_event(
+                    work_order_path,
+                    stage="submit",
+                    status="filled_no_submit",
+                    submitter="skill",
+                    message="Issue form filled but not submitted because --no-submit was set.",
+                    artifacts_dir=str(artifacts.resolve()),
+                )
                 print("NO-SUBMIT: filled the form but will not click Create.")
                 save_debug(page, artifacts, "no_submit")
                 return 0
@@ -781,19 +1113,97 @@ def main() -> int:
                     if is_issue_created_url(cur):
                         print(f"SUCCESS: {cur}")
                         _update_work_order_file(work_order_path, cur)
+                        update_work_order_runtime(
+                            work_order_path,
+                            {
+                                "status": "submitted",
+                                "last_error": "",
+                                "last_error_at": "",
+                            },
+                            {
+                                "issue_url": cur,
+                                "issue_number": _extract_issue_number_from_url(cur),
+                            },
+                        )
+                        append_work_order_event(
+                            work_order_path,
+                            stage="submit",
+                            status="succeeded",
+                            submitter="skill",
+                            message="Issue created successfully.",
+                            issue_url=cur,
+                            issue_number=_extract_issue_number_from_url(cur),
+                            artifacts_dir=str(artifacts.resolve()),
+                        )
                         if not args.headless:
                             time.sleep(10)
                         return 0
 
                 save_debug(page, artifacts, f"submit_attempt_{attempt}")
+                append_work_order_event(
+                    work_order_path,
+                    stage="submit_attempt",
+                    status="retry",
+                    submitter="skill",
+                    message=f"Submit attempt {attempt} stayed on create page; retrying.",
+                    artifacts_dir=str(artifacts.resolve()),
+                )
                 print(f"Attempt {attempt}: still on create page (validation may have failed). Retrying...")
 
+            update_work_order_runtime(
+                work_order_path,
+                {
+                    "status": "failed",
+                    "last_error": "Failed to submit after 3 attempts.",
+                    "last_error_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat(),
+                },
+            )
+            append_work_order_event(
+                work_order_path,
+                stage="submit",
+                status="failed",
+                submitter="skill",
+                error="Failed to submit after 3 attempts.",
+                artifacts_dir=str(artifacts.resolve()),
+            )
             raise SystemExit("Failed to submit after 3 attempts. See artifacts/*.png and *.html for details.")
 
     except PlaywrightTimeoutError as e:
+        update_work_order_runtime(
+            work_order_path,
+            {
+                "status": "failed",
+                "last_error": f"Timeout waiting for element/state: {e}",
+                "last_error_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat(),
+            },
+        )
+        append_work_order_event(
+            work_order_path,
+            stage="playwright",
+            status="failed",
+            submitter="skill",
+            error=f"Timeout waiting for element/state: {e}",
+            artifacts_dir=str(artifacts.resolve()),
+        )
         save_debug(page, artifacts, "timeout") if page else None
         raise SystemExit(f"Timeout waiting for element/state: {e}") from e
     except PlaywrightError as e:
+        update_work_order_runtime(
+            work_order_path,
+            {
+                "status": "failed",
+                "last_error": str(e),
+                "last_error_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat(),
+            },
+        )
+        append_work_order_event(
+            work_order_path,
+            stage="playwright",
+            status="failed",
+            submitter="skill",
+            error=str(e),
+            artifacts_dir=str(artifacts.resolve()),
+        )
         save_debug(page, artifacts, "browser_error") if page else None
         err_text = str(e)
         print(f"[ERROR] Playwright detail: {err_text}")
@@ -816,10 +1226,31 @@ def main() -> int:
             "Playwright 启动/运行失败：可能未安装浏览器或依赖不足。"
             " 解决：先运行 `python -m playwright install chromium`，必要时补齐系统依赖或改用 MCP。"
         ) from e
+    except SystemExit:
+        raise
+    except Exception as e:
+        update_work_order_runtime(
+            work_order_path,
+            {
+                "status": "failed",
+                "last_error": str(e),
+                "last_error_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat(),
+            },
+        )
+        append_work_order_event(
+            work_order_path,
+            stage="submit",
+            status="failed",
+            submitter="skill",
+            error=str(e),
+            artifacts_dir=str(artifacts.resolve()),
+        )
+        raise
     finally:
         with contextlib.suppress(Exception):
             if context:
                 context.close()
+        _disable_run_logging(log_state)
 
 
 if __name__ == "__main__":

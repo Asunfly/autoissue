@@ -3,3 +3,8 @@ __pycache__/
 *.py[cod]
 *.class
 .claude/
+.tmp/
+issue_runs/
+artifacts/
+.venv/
+aionui-issue-agent-minimal/tests/
