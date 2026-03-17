@@ -1,4 +1,4 @@
-# aionui-issue-agent-minimal (v22)
+# aionui-issue-agent-minimal (v23)
 
 最简分支：固定只提交到 GitHub 项目 `iOfficeAI/AionUi`（Bug / Feature）。
 
@@ -9,11 +9,13 @@
 ### Windows
 - 仅运行：`run_windows.cmd`
   - 传额外参数给 Python（调试推荐）：`run_windows.cmd "D:\\my-issues\\work_order.json" --no-submit`
+  - 仅准备附件 Markdown：`run_windows.cmd "D:\\my-issues\\work_order.json" --prepare-attachments-only`
   - 强制再次提交（忽略 issue_number/issue_url 去重保护）：`run_windows.cmd "D:\\my-issues\\work_order.json" --force`
 
 ### macOS / Linux
 - 运行：`bash run_macos_linux.sh`
   - 传额外参数给 Python（调试推荐）：`bash run_macos_linux.sh /path/to/work_order.json --no-submit`
+  - 仅准备附件 Markdown：`bash run_macos_linux.sh /path/to/work_order.json --prepare-attachments-only`
   - 强制再次提交（忽略 issue_number/issue_url 去重保护）：`bash run_macos_linux.sh /path/to/work_order.json --force`
 
 > 入口脚本已简化为薄包装，实际初始化由 `scripts/python/bootstrap.py` 完成（创建 venv、安装依赖、安装浏览器）。默认是有头模式，首次运行需你手动登录 GitHub 一次；后续会复用 `chromium_user_data` 登录态（若会话过期仍需重新登录）。
@@ -27,14 +29,28 @@
 ### 1) 你需要准备的文件（用户可见）
 - **work_order.json**（你自己放在“工作目录”里）
   - 推荐：在你准备提 issue 的任意工作目录中创建，例如：
-    - `D:\my-issues\work_order.json`
+    - `D:\my-issues\issue_runs\chat-20260306-01\wo-20260306T111530-a1b2c3\work_order.json`
   - 运行脚本时会读取这个文件，并在提交成功后回写：
     - `issue_number`（例如 `"626"`）
     - `issue_url`（例如 `"https://github.com/iOfficeAI/AionUi/issues/626"`）
+  - 若先执行附件准备，还会回写：
+    - `attachment_markdown`（GitHub 已托管图片/文件的 Markdown）
+    - `attachment_upload_status`（例如 `"uploaded"`）
+  - 运行过程中还会回写：
+    - `runtime.*`（状态、日志路径、计数器）
+    - `events[]`（过程/报错历史）
 
 > work_order.json 的字段名必须与 `assets/templates/*.yml` 中的 YAML `id` 对齐；可参考 `assets/examples/` 里的示例。
 >
 > 小技巧：Bug 的 `platform` 可写 `"auto"`（或留空）让脚本在运行时按当前系统推断，并写回为模板可选值。
+>
+> 如果后续想走 `github_mcp` 创建 issue，可先执行 `--prepare-attachments-only`，再运行 `scripts/python/build_github_mcp_payload.py --work-order /path/to/work_order.json` 生成 `title/body`。
+>
+> 重要：一个 `work_order.json` 只对应一个 issue。多 issue 会话请为每个 issue 新建独立工作目录，不要复用已提交 issue 的 `work_order.json`。
+>
+> 附件补充：`attachments` 可以是绝对路径，也可以是相对 `work_order.json` 的路径；提交器只读取当前单据里的附件，不会扫描其他 issue 的历史文件。
+>
+> 图片预上传当前只支持 `.png`、`.gif`、`.jpg`、`.jpeg` 且单文件不超过 `10MB`。不支持或超限的附件会被跳过上传，但不会阻断本次提交。
 
 ### 运行相关环境变量（可选）
 - `SKIP_PLAYWRIGHT_INSTALL=1`：跳过 Playwright 浏览器下载（已预置浏览器缓存时使用）

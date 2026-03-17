@@ -1,4 +1,7 @@
 {
+  "schema_version": "v23",
+  "session_id": "chat-20260306-01",
+  "work_id": "wo-20260306T112000-d4e5f6",
   "owner_repo": "iOfficeAI/AionUi",
   "project_url": "https://github.com/iOfficeAI/AionUi",
   "issue_type": "feature",
@@ -9,6 +12,23 @@
   "feature_category": "UI/UX Improvement",
   "additional_context": "",
   "attachments": [],
+  "attachment_markdown": "",
+  "attachment_upload_status": "none",
   "issue_number": "",
-  "issue_url": ""
+  "issue_url": "",
+  "runtime": {
+    "workspace_dir": "/abs/path/issue_runs/chat-20260306-01/wo-20260306T112000-d4e5f6",
+    "artifacts_dir": "/abs/path/issue_runs/chat-20260306-01/wo-20260306T112000-d4e5f6/artifacts",
+    "status": "draft",
+    "last_submitter": "",
+    "last_error": "",
+    "last_error_at": "",
+    "last_run_log": "",
+    "last_payload_path": "",
+    "attempt_count": 0,
+    "prepare_count": 0,
+    "submission_count": 0,
+    "updated_at": ""
+  },
+  "events": []
 }

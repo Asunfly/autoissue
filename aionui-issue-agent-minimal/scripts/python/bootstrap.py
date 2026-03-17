@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from issue_payload_support import append_work_order_event, ensure_work_order_runtime, update_work_order_runtime
+
 
 def _find_work_order_and_args(argv: List[str]) -> Tuple[Path, List[str]]:
     if argv and not argv[0].startswith("-"):
@@ -194,6 +196,25 @@ def main() -> int:
     artifacts = work_dir / "artifacts"
     user_data_dir = _default_user_data_dir()
     pause_sec = os.environ.get("PAUSE_BEFORE_SUBMIT_SEC", "10")
+    ensure_work_order_runtime(work_order)
+    update_work_order_runtime(
+        work_order,
+        {
+            "workspace_dir": str(work_dir.resolve()),
+            "artifacts_dir": str(artifacts.resolve()),
+            "last_submitter": "skill",
+            "last_run_log": str((artifacts / "run.log").resolve()),
+            "status": "bootstrap_starting",
+        },
+    )
+    append_work_order_event(
+        work_order,
+        stage="bootstrap",
+        status="started",
+        submitter="skill",
+        message="Bootstrap script started.",
+        artifacts_dir=str(artifacts.resolve()),
+    )
 
     if not _in_venv():
         venv_py = _ensure_venv(root)
@@ -240,6 +261,23 @@ def main() -> int:
     cmd += extra_args
     code = subprocess.call(cmd)
     _write_status(final_artifacts, work_order, code)
+    update_work_order_runtime(
+        work_order,
+        {
+            "status": "bootstrap_succeeded" if code == 0 else "bootstrap_failed",
+            "last_error": "" if code == 0 else f"Bootstrap exited with code {code}",
+            "last_error_at": "" if code == 0 else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        },
+    )
+    append_work_order_event(
+        work_order,
+        stage="bootstrap",
+        status="succeeded" if code == 0 else "failed",
+        submitter="skill",
+        message="Bootstrap finished." if code == 0 else "",
+        error="" if code == 0 else f"Bootstrap exited with code {code}",
+        artifacts_dir=str(final_artifacts.resolve()),
+    )
     if code == 0:
         print("[SUCCESS] Submission finished.")
         print("[INFO] Check work_order.json for issue_url/issue_number.")
