@@ -7,10 +7,10 @@ import shutil
 import subprocess
 import sys
 import time
+import json
+import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
-
-from issue_payload_support import append_work_order_event, ensure_work_order_runtime, update_work_order_runtime
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _find_work_order_and_args(argv: List[str]) -> Tuple[Path, List[str]]:
@@ -184,6 +184,111 @@ def _extract_cli_value(args: List[str], key: str) -> Optional[str]:
     return None
 
 
+def _iso_now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _load_work_order_data(path: Path) -> Dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_work_order_data(path: Path, data: Dict[str, Any]) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _ensure_work_order_runtime(path: Path) -> Dict[str, Any]:
+    data = _load_work_order_data(path)
+    changed = False
+
+    runtime = data.get("runtime")
+    if not isinstance(runtime, dict):
+        runtime = {}
+        data["runtime"] = runtime
+        changed = True
+
+    defaults = {
+        "workspace_dir": str(path.parent.resolve()),
+        "artifacts_dir": str((path.parent / "artifacts").resolve()),
+        "status": "draft",
+        "last_submitter": "",
+        "last_error": "",
+        "last_error_at": "",
+        "last_run_log": "",
+        "last_payload_path": "",
+        "attempt_count": 0,
+        "prepare_count": 0,
+        "submission_count": 0,
+        "updated_at": _iso_now(),
+    }
+    for key, value in defaults.items():
+        if runtime.get(key) in (None, ""):
+            runtime[key] = value
+            changed = True
+
+    events = data.get("events")
+    if not isinstance(events, list):
+        data["events"] = []
+        changed = True
+
+    if changed:
+        _write_work_order_data(path, data)
+    return data
+
+
+def _update_work_order_runtime(
+    path: Path,
+    runtime_updates: Dict[str, Any],
+) -> Dict[str, Any]:
+    data = _ensure_work_order_runtime(path)
+    runtime = data["runtime"]
+    changed = False
+
+    for key, value in (runtime_updates or {}).items():
+        if runtime.get(key) != value:
+            runtime[key] = value
+            changed = True
+
+    now = _iso_now()
+    if runtime.get("updated_at") != now:
+        runtime["updated_at"] = now
+        changed = True
+    if changed:
+        _write_work_order_data(path, data)
+    return data
+
+
+def _append_work_order_event(
+    path: Path,
+    *,
+    stage: str,
+    status: str,
+    submitter: str,
+    message: str = "",
+    error: str = "",
+    issue_url: str = "",
+    issue_number: str = "",
+    artifacts_dir: str = "",
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    data = _ensure_work_order_runtime(path)
+    event: Dict[str, Any] = {
+        "timestamp": _iso_now(),
+        "stage": stage,
+        "status": status,
+        "submitter": submitter,
+        "message": message,
+        "error": error,
+        "issue_url": issue_url,
+        "issue_number": issue_number,
+        "artifacts_dir": artifacts_dir,
+    }
+    if extra is not None:
+        event["extra"] = extra
+    data["events"].append(event)
+    _write_work_order_data(path, data)
+    return data
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[2]
     work_order, extra_args = _find_work_order_and_args(sys.argv[1:])
@@ -196,8 +301,8 @@ def main() -> int:
     artifacts = work_dir / "artifacts"
     user_data_dir = _default_user_data_dir()
     pause_sec = os.environ.get("PAUSE_BEFORE_SUBMIT_SEC", "10")
-    ensure_work_order_runtime(work_order)
-    update_work_order_runtime(
+    _ensure_work_order_runtime(work_order)
+    _update_work_order_runtime(
         work_order,
         {
             "workspace_dir": str(work_dir.resolve()),
@@ -207,7 +312,7 @@ def main() -> int:
             "status": "bootstrap_starting",
         },
     )
-    append_work_order_event(
+    _append_work_order_event(
         work_order,
         stage="bootstrap",
         status="started",
@@ -261,7 +366,7 @@ def main() -> int:
     cmd += extra_args
     code = subprocess.call(cmd)
     _write_status(final_artifacts, work_order, code)
-    update_work_order_runtime(
+    _update_work_order_runtime(
         work_order,
         {
             "status": "bootstrap_succeeded" if code == 0 else "bootstrap_failed",
@@ -269,7 +374,7 @@ def main() -> int:
             "last_error_at": "" if code == 0 else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         },
     )
-    append_work_order_event(
+    _append_work_order_event(
         work_order,
         stage="bootstrap",
         status="succeeded" if code == 0 else "failed",
