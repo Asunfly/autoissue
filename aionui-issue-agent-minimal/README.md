@@ -1,4 +1,4 @@
-# aionui-issue-agent-minimal (v23)
+# aionui-issue-agent-minimal (v24)
 
 最简分支：固定只提交到 GitHub 项目 `iOfficeAI/AionUi`（Bug / Feature）。
 

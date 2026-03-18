@@ -13,6 +13,7 @@ from issue_payload_support import (
     build_issue_body_markdown,
     build_local_attachment_markdown,
     ensure_work_order_runtime,
+    filter_uploadable_attachments,
     load_issue_template,
     normalize_work_order_dict,
     resolve_attachment_paths,
@@ -43,7 +44,8 @@ def main() -> int:
     attachment_paths, missing_paths = resolve_attachment_paths(norm.get("attachments", []), work_order_path.parent)
     attachment_markdown = norm.get("attachment_markdown", "").strip()
     if not attachment_markdown:
-        attachment_markdown = build_local_attachment_markdown(attachment_paths, missing_paths)
+        _, skipped = filter_uploadable_attachments(attachment_paths)
+        attachment_markdown = build_local_attachment_markdown(attachment_paths, missing_paths, skipped)
     raw_status = str(raw.get("attachment_upload_status") or "").strip().lower()
     if raw_status in ("", "none"):
         if norm.get("attachment_markdown"):

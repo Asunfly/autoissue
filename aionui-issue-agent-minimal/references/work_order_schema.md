@@ -1,6 +1,7 @@
-# work_order.json schema (v23)
+# work_order.json schema (v24)
 
-v23 uses YAML-driven fill based on GitHub Issue Forms templates under `assets/templates/`.
+v24 adds repo-based attachment upload for github_mcp (no browser needed).
+Uses YAML-driven fill based on GitHub Issue Forms templates under `assets/templates/`.
 
 ## Core rule for multi-issue sessions
 - `work_order.json` is now defined as **one issue = one work order**.
@@ -41,11 +42,16 @@ Example:
 - Only the current work order's `attachments` are consumed during prepare/submit; other `work_id` histories must be ignored.
 - attachment_markdown: string (optional; content generated after uploading attachments to GitHub, may be Markdown or GitHub-returned HTML `<img ...>` snippet)
 - attachment_upload_status: string (optional; `uploaded` / `listed_local` / `missing_files` / `upload_failed` / `none`)
+- attachment_upload_method: string (optional; `"repo"` / `"browser"` / `""`)
+  - `"repo"`: uploaded to the user's `{login}/issue-assets` public repo via GitHub Content API (github_mcp path)
+  - `"browser"`: uploaded via Playwright browser to GitHub Issue Form (skill path)
+- attachment_repo: string (optional; e.g. `"Asunfly/issue-assets"`, records which assets repo was used)
 - Upload filter: `.png` / `.gif` / `.jpg` / `.jpeg`, max `10MB` per file
 - Unsupported or oversized files are skipped before upload and should be recorded in `events[].extra.skipped_attachments`
+- Duplicate filenames within the same `work_id` are auto-suffixed (e.g. `screenshot.png` → `screenshot-2.png`)
 
 ## Multi-issue identity fields
-- schema_version: string (`v23`)
+- schema_version: string (`v24`)
 - session_id: string (same chat/session can share this)
 - work_id: string (unique per issue work item)
 

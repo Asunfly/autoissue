@@ -3,7 +3,7 @@ name: github-issue-autosubmit-aionui
 description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOfficeAI/AionUi。默认用 Python + Playwright 打开 GitHub、等待用户登录、选择模板、填表、点击 Create。支持 macOS/Windows/Ubuntu；通过 work_order.json 传入变量；也可选择 Chrome DevTools MCP 流程（不依赖本脚本）。
 ---
 
-# GitHub Issue AutoSubmit (AionUi Minimal, v23)
+# GitHub Issue AutoSubmit (AionUi Minimal, v24)
 
 ## 适用场景
 - 你已经准备好结构化的 Issue 内容（对应 `assets/templates/*.yml` 的字段 `id`）
@@ -36,6 +36,8 @@ description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOffi
 - `scripts/python/submit_aionui_issue.py`：核心提交脚本（读取模板、校验、打开 GitHub、回填、提交）
 - `scripts/python/build_submitter_bundle.py`：为 `skill` / `chrome_mcp` / `github_mcp` 生成统一的提交输入
 - `scripts/python/build_github_mcp_payload.py`：生成 GitHub MCP 需要的 `title/body`
+- `scripts/python/prepare_attachments_for_repo.py`：为 github_mcp 路径准备附件（base64 编码 + 远程路径），不调用 API
+- `scripts/python/writeback_attachment_urls.py`：将上传后的附件 URL 写回 work_order.json
 - `assets/templates/*.yml`：GitHub Issue Forms 模板（字段 id/必填/options 的事实来源）
 - `assets/examples/*.json`：work_order 示例
 - `references/*.md`：平台/排障说明

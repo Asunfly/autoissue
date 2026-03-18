@@ -1,5 +1,5 @@
 {
-  "schema_version": "v23",
+  "schema_version": "v24",
   "session_id": "chat-20260306-01",
   "work_id": "wo-20260306T111530-a1b2c3",
   "owner_repo": "iOfficeAI/AionUi",
@@ -16,6 +16,8 @@
   "attachments": [],
   "attachment_markdown": "",
   "attachment_upload_status": "none",
+  "attachment_upload_method": "",
+  "attachment_repo": "",
   "issue_number": "",
   "issue_url": "",
   "runtime": {

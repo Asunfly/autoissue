@@ -16,6 +16,7 @@ from issue_payload_support import (
     ensure_work_order_runtime,
     field_label,
     field_type,
+    filter_uploadable_attachments,
     load_issue_template,
     normalize_work_order_dict,
     resolve_attachment_paths,
@@ -50,8 +51,9 @@ def main() -> int:
     norm, _ = apply_template_defaults(tpl, norm)
 
     attachment_paths, missing_paths = resolve_attachment_paths(norm.get("attachments", []), work_order_path.parent)
+    _, skipped = filter_uploadable_attachments(attachment_paths)
     attachment_markdown = str(norm.get("attachment_markdown") or "").strip()
-    local_attachment_markdown = build_local_attachment_markdown(attachment_paths, missing_paths)
+    local_attachment_markdown = build_local_attachment_markdown(attachment_paths, missing_paths, skipped)
     attachment_block = attachment_markdown or local_attachment_markdown
 
     base = {

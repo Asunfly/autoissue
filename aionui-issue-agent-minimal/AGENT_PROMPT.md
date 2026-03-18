@@ -1,4 +1,4 @@
-# AionUi Issue Agent（最简分支：固定仓库 iOfficeAI/AionUi，v23）
+# AionUi Issue Agent（最简分支：固定仓库 iOfficeAI/AionUi，v24）
 
 > 用途：把用户的图文问题描述自动整理成 GitHub Issue 草稿，并在用户明确要求“提交/发布/一键提交”时提交到固定仓库：
 > https://github.com/iOfficeAI/AionUi
@@ -71,13 +71,13 @@
 ### 浏览器隔离说明
 - **Skill（Playwright）**：启动独立的 Chromium 进程，user-data-dir 为 `~/.config/AionUi/chromium_user_data/`，与用户日常浏览器完全隔离，互不影响。提交完成后自动关闭整个浏览器进程。
 - **chrome_mcp（Chrome DevTools MCP）**：通过 CDP 启动一个新的 Chrome 实例（非用户日常浏览器）。启动时自带一个 `about:blank` 空白标签页，`new_page` 会再开一个目标页面（共两个 tab）。用户可以看到操作过程。已知限制：`close_page` 只能关闭目标标签页，`about:blank` 和浏览器窗口本身会残留，需用户手动关闭。
-- **github_mcp（GitHub MCP）**：直接创建 issue，不依赖浏览器表单；若要展示本地截图，需先有 `attachment_markdown`。
+- **github_mcp（GitHub MCP）**：完全不依赖浏览器。附件通过 GitHub Content API 上传到用户自己的 `{login}/issue-assets` 公开仓库，获取 raw URL 后嵌入 issue body。认证复用 GitHub MCP 已有配置，无需额外设置。
 
 ## work_order.json 生成规范（skill / chrome_mcp / github_mcp 共用）
 - 无论走哪条链路，都先生成 `work_order.json`，作为统一的结构化数据源。
 - 字段必须对齐 `assets/templates/*.yml` 的 YAML `id`；schema 见 `references/work_order_schema.md`。
 - 固定字段（总是生成）：
-  - `schema_version`: `v23`
+  - `schema_version`: `v24`
   - `session_id`: 同一对话/会话共享
   - `work_id`: 每个 issue 唯一
   - `owner_repo`: `iOfficeAI/AionUi`
@@ -117,22 +117,47 @@
 - 若本地截图/录屏/日志需要真正跟随 issue 发布，先准备 `attachment_markdown`，不要把本地路径直接交给 `github_mcp`。
 - 预上传前会先过滤 GitHub 当前支持的图片：`.png`、`.gif`、`.jpg`、`.jpeg`，且单文件不超过 `10MB`。
 - 不支持或超限的附件只跳过上传，不阻断本次 issue；需在回复中说明它们仅以本地路径形式保留。
-- 可用独立准备工具：
-  - `bash run_macos_linux.sh /path/to/work_order.json --prepare-attachments-only`
-  - 它只会打开 GitHub Issue Form，把附件上传到 `Additional Context`，并回写 `attachment_markdown`，不会创建 issue。
+- 同一 `work_id` 下若有同名文件，脚本自动加序号后缀（如 `screenshot.png` → `screenshot-2.png`）。
+
+### 附件准备方式（按提交器区分）
+
+- **github_mcp 专用（推荐，纯 API，不弹浏览器）**：
+  1. `python scripts/python/prepare_attachments_for_repo.py --work-order /path/to/work_order.json`
+     → 输出 JSON，含每个附件的 base64 内容和目标远程路径
+  2. 用 GitHub MCP `get_me` 获取用户 login
+  3. 用 GitHub MCP `get_file_contents` 检查 `{login}/issue-assets` 仓库是否存在
+     → 仅在不存在时才调用 `create_repository` 创建公开仓库（避免重复创建）
+  4. 用 GitHub MCP `push_files` 将所有附件一次性上传到 `issue-assets` 仓库（单次 commit，支持多文件）
+  5. 根据 login 和远程路径构建 raw URL：`https://raw.githubusercontent.com/{login}/issue-assets/main/{remote_path}`
+  6. `python scripts/python/writeback_attachment_urls.py --work-order ... --urls '{...}' --repo '{login}/issue-assets' --method repo`
+     → 写回 `attachment_markdown` / `attachment_upload_status` / `attachment_upload_method` / `attachment_repo` 到 work_order.json
+  - 认证复用 GitHub MCP 已有配置，无需额外设置 GITHUB_TOKEN
+  - 仓库目录结构：`issue-assets/{target_owner}/{target_repo}/{work_id}/filename.png`
+- **浏览器方式（skill / chrome_mcp 专用）**：表单原生处理附件上传，不需要预上传
+- 旧的 `--prepare-attachments-only`（Playwright 浏览器上传）保留作为 skill 路径的备选
+
 - `github_mcp` / `chrome_mcp` / `skill` 都只消费准备结果，不要求彼此嵌套调用。
 
 ## github_mcp 提交流程（当 submit_method="github_mcp"）
-目标：直接通过 GitHub MCP 创建 issue。
+目标：直接通过 GitHub MCP 创建 issue，不依赖浏览器。
 
 ### 数据源
 - GitHub MCP 路径从 `work_order.json` 读取字段，并优先使用 `attachment_markdown` 生成 body。
 
 ### 操作步骤
 1) 生成 `work_order.json`
-2) 若存在本地附件且尚无 `attachment_markdown`，先执行附件准备阶段
-3) 用 `scripts/python/build_github_mcp_payload.py --work-order /path/to/work_order.json` 生成 `title/body`
-4) 调用 GitHub MCP 创建 issue
+2) 若 `attachments` 包含本地文件且 `attachment_markdown` 为空：
+   a. 运行 `prepare_attachments_for_repo.py --work-order ...` 准备附件数据（base64 + 目标路径）
+   b. 调用 GitHub MCP `get_me` 获取当前用户 login
+   c. 调用 GitHub MCP `get_file_contents`（owner={login}, repo=issue-assets, path="/"）检查仓库是否存在
+      → 仅在返回错误（仓库不存在）时调用 `create_repository`（name=issue-assets, private=false, autoInit=true）
+   d. 从准备脚本输出的 JSON 中提取 files，调用 GitHub MCP `push_files`：
+      - owner={login}, repo=issue-assets, branch=main
+      - files: 每个文件的 path=remote_path, content=base64_content
+      - message: "Upload attachments for {work_id}"
+   e. 根据 login 和 remote_path 构建 raw URL，调用 `writeback_attachment_urls.py` 写回
+3) 运行 `build_github_mcp_payload.py --work-order ...` 生成 payload（title/body）
+4) 调用 GitHub MCP 创建 issue（owner_repo 中解析 owner 和 repo）
 5) 回传最终 issue URL，并写回 `work_order.json` 的 `issue_number` / `issue_url`
 
 ## chrome_mcp 提交流程（当 submit_method="chrome_mcp"）

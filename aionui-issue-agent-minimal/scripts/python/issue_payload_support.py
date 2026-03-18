@@ -13,9 +13,12 @@ import yaml
 
 AIONUI_REPO = "iOfficeAI/AionUi"
 AIONUI_URL = "https://github.com/iOfficeAI/AionUi"
-WORK_ORDER_SCHEMA_VERSION = "v23"
+WORK_ORDER_SCHEMA_VERSION = "v24"
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".gif", ".jpg", ".jpeg"}
 MAX_GITHUB_IMAGE_BYTES = 10 * 1024 * 1024
+
+DEFAULT_ASSETS_REPO_NAME = "issue-assets"
+GITHUB_RAW_URL_TEMPLATE = "https://raw.githubusercontent.com/{login}/{repo}/main/{path}"
 
 
 def iso_now() -> str:
@@ -227,6 +230,21 @@ def build_local_attachment_markdown(
         lines = [f"- `{item['path']}`: `{item['reason']}`" for item in skipped]
         sections.append("附件已跳过上传（仍保留本地路径）:\n" + "\n".join(lines))
     return "\n\n".join(sections).strip()
+
+
+def build_repo_attachment_markdown(uploaded_files: List[Dict[str, str]]) -> str:
+    """Build markdown from files uploaded to a GitHub assets repo.
+
+    Args:
+        uploaded_files: list of {"filename": "name.png", "raw_url": "https://..."}
+
+    Returns:
+        Markdown string with ![filename](url) lines.
+    """
+    if not uploaded_files:
+        return ""
+    lines = [f"![{f['filename']}]({f['raw_url']})" for f in uploaded_files]
+    return "\n".join(lines)
 
 
 def merge_markdown_blocks(*blocks: str) -> str:
