@@ -7,4 +7,3 @@ __pycache__/
 issue_runs/
 artifacts/
 .venv/
-aionui-issue-agent-minimal/tests/

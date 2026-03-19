@@ -720,7 +720,6 @@ def _disable_run_logging(state) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Auto-submit GitHub issue to iOfficeAI/AionUi (YAML-driven Issue Forms).")
     p.add_argument("--work-order", required=False, help="Path to work_order.json")
-    p.add_argument("--work-order-file", required=False, help="Alias of --work-order")
     p.add_argument("--headless", action="store_true", help="Run browser headless")
     p.add_argument("--timeout-sec", type=int, default=30, help="Element wait timeout seconds")
     p.add_argument("--login-wait-sec", type=int, default=600, help="Max seconds to wait for manual login")
@@ -742,10 +741,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     _apply_playwright_platform_override_for_macos_arm64()
     args = parse_args()
-    if not args.work_order and args.work_order_file:
-        args.work_order = args.work_order_file
     if not args.work_order:
-        raise SystemExit("Missing: --work-order (or --work-order-file)")
+        raise SystemExit("Missing: --work-order")
 
     work_order_path = Path(args.work_order)
     artifacts = Path(args.artifacts_dir)

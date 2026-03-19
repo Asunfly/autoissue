@@ -1,146 +1,62 @@
 ---
 name: github-issue-autosubmit-aionui
-description: 自动把用户整理好的 Issue 内容提交到固定仓库 iOfficeAI/AionUi。默认用 Python + Playwright 打开 GitHub、等待用户登录、选择模板、填表、点击 Create。支持 macOS/Windows/Ubuntu；通过 work_order.json 传入变量；也可选择 Chrome DevTools MCP 流程（不依赖本脚本）。
+description: AionUi issue 提交 skill。此 skill 只负责本地 Playwright 提交器（skill 路径）；chrome_mcp 和 github_mcp 由 AGENT_PROMPT 统筹并调用各自独立脚本。
 ---
 
-# GitHub Issue AutoSubmit (AionUi Minimal, v24)
+# AionUi Issue Skill
 
-## 适用场景
-- 你已经准备好结构化的 Issue 内容（对应 `assets/templates/*.yml` 的字段 `id`）
-- 你想把这些内容自动填写到 GitHub Issue Form 并提交到固定仓库 `iOfficeAI/AionUi`
-- 可被对话式 Agent 调用，也可脱离 Agent **直接手动运行**
+## 定位
+- 这个 `SKILL.md` 只描述 `skill` 提交器
+- `AGENT_PROMPT.md` 负责三种提交方式的统筹、选择和失败回落
+- `chrome_mcp` 和 `github_mcp` 不是本 skill 的通用流程，不复用这里的运行入口
 
-## 能力边界（重要）
-- ✅ 支持：Bug / Feature（Issue Forms 模板驱动回填），手动登录等待，失败截图/HTML/日志落盘
-- ✅ 支持：`--no-submit`（仅填表不点击 Create）、`--headless`、`--force`（忽略去重保护）
-- ✅ 支持：Bug 的 `platform` 自动推断（`"platform":"auto"`/缺省时写回为模板可选值）
-- ✅ 支持：把本地附件上传到 GitHub `Additional Context`，并回写 `attachment_markdown`
-- ✅ 支持：`--prepare-attachments-only`（只准备附件 URL/Markdown，不创建 issue）
-- ✅ 支持：上传前过滤不受支持或超限的图片附件，不阻断当前 issue 提交
+## 输入
+- 统一输入：`work_order.json`
+- 字段约束：见 `references/work_order_schema.md`
+- `work_order.json` 一次只对应一个 issue
 
-## 输入（work_order.json）
-- Schema：见 `references/work_order_schema.md`
-- 一个 `work_order.json` 只对应一个 issue；多 issue 会话请使用多个工作目录与多个 `work_order.json`
-- 提交或准备附件时，只会消费当前 `work_order.json.attachments`
-- 示例：
-  - Bug：`assets/examples/work_order_bug_example.json`
-  - Bug（完整）：`assets/examples/work_order_bug_full.json`
-  - Feature：`assets/examples/work_order_feature_example.json`
-  - Feature（完整）：`assets/examples/work_order_feature_full.json`
+## skill 路径
+- 入口：
+  - Windows：`run_windows.cmd [work_order.json] [args...]`
+  - macOS/Linux：`bash run_macos_linux.sh [work_order.json] [args...]`
+- 实际链路：
+  - `run_*` → `scripts/python/skill_bootstrap.py` → `scripts/python/skill_submit_aionui_issue.py`
 
-## 运行
-参考 `README.md`（入口脚本、产物路径、常见问题）。
+## 公开参数
+- `--no-submit`
+- `--prepare-attachments-only`
+- `--headless`
+- `--user-data-dir <dir>`
+- `--profile-dir <name>`
+- `--browser-binary <path>`
+- `--login-wait-sec <sec>`
+- `--timeout-sec <sec>`
+- `--pause-before-submit-sec <sec>`
+- `--force`
 
-## 文件结构（你在仓库里能看到的）
-- `run_windows.cmd` / `run_macos_linux.sh`：跨平台入口（创建 venv、安装依赖、调用 Python）
-- `scripts/python/submit_aionui_issue.py`：核心提交脚本（读取模板、校验、打开 GitHub、回填、提交）
-- `scripts/python/build_submitter_bundle.py`：为 `skill` / `chrome_mcp` / `github_mcp` 生成统一的提交输入
-- `scripts/python/build_github_mcp_payload.py`：生成 GitHub MCP 需要的 `title/body`
-- `scripts/python/prepare_attachments_for_repo.py`：为 github_mcp 路径准备附件（base64 编码 + 远程路径），不调用 API
-- `scripts/python/writeback_attachment_urls.py`：将上传后的附件 URL 写回 work_order.json
-- `assets/templates/*.yml`：GitHub Issue Forms 模板（字段 id/必填/options 的事实来源）
-- `assets/examples/*.json`：work_order 示例
-- `references/*.md`：平台/排障说明
+## 保留的防护逻辑
+- `skill_submit_aionui_issue.py` 仍保留 `issue_number / issue_url` 的重复提交保护
+- `--force` 仍然只在你明确要重提同一个 work_order 时使用
+- 附件过滤、运行态写回、事件历史回写仍保留
 
-## 与 Agent Prompt 的关系（重要）
-- **Skill 不会读取/依赖 `AGENT_PROMPT.md`**；Skill 的输入只有 `work_order.json` + CLI 参数。
-- `AGENT_PROMPT.md` 仅用于“对话层”的内容抽取与决策（何时生成/何时提交），属于可编辑的上层策略文件；Skill 可以被替换成任意实现，只要保持 `work_order.json` 协议与 CLI 行为一致。
+## 相关但独立的脚本
+- `scripts/python/chrome_mcp_build_bundle.py`
+  - 只给 `chrome_mcp` 生成字段清单
+- `scripts/python/github_mcp_build_payload.py`
+  - 只给 `github_mcp` 生成 `title/body`
+- `scripts/python/github_mcp_upload_attachments.py`
+  - 只在 `github_mcp` 且存在本地图片附件时使用
 
-## 入口脚本（跨平台）
-- Windows：`run_windows.cmd [work_order.json 路径] [python 参数...]`
-- macOS/Linux：`bash run_macos_linux.sh [work_order.json 路径] [python 参数...]`
+## 当前目录建议
+- 主入口：
+  - `scripts/python/skill_bootstrap.py`
+  - `scripts/python/skill_submit_aionui_issue.py`
+- 公共支持：
+  - `scripts/python/issue_payload_support.py`
+- 模板与示例：
+  - `assets/templates/*.yml`
+  - `assets/examples/*.json`
 
-入口脚本已简化为薄包装，实际初始化由 `scripts/python/bootstrap.py` 完成（创建 venv、安装依赖、安装浏览器），并把额外参数透传给 `scripts/python/submit_aionui_issue.py`。
-
-## 常用参数（透传给 Python）
-- `--no-submit`：仅填表，不点击 Create（调试推荐）
-- `--prepare-attachments-only`：只上传 `attachments` 到 `Additional Context` 并回写 `attachment_markdown`
-- `--headless`：无界面模式（服务器/CI）
-- `--user-data-dir <dir>`：复用 GitHub 登录态（强烈建议）
-- `--profile-dir <name>`：指定 user-data-dir 内的 profile
-- `--browser-binary <path>`：指定 Chromium/Chrome 可执行路径
-- `--login-wait-sec <sec>`：等待手动登录的最长时间
-- `--timeout-sec <sec>`：元素等待超时
-- `--pause-before-submit-sec <sec>`：填表后暂停检查再提交
-- `--force`：忽略 `issue_number/issue_url` 的去重保护，强制再次提交
-
-## 附件说明
-- `attachments` 可以是绝对路径，也可以是相对 `work_order.json` 的路径。
-- 当前实现不会假设附件必须位于 `work_id` 目录内，但多 issue 会话仍建议为每个 issue 使用独立工作目录。
-- GitHub 预上传当前只接受 `.png`、`.gif`、`.jpg`、`.jpeg`，且单文件不超过 `10MB`。
-- 不支持或超限的附件会被跳过上传，并作为本地路径记录在 `Additional Context` / `events[]` 中。
-
-## 运行策略
-- 默认：有界面模式，脚本会停在登录态判断处，等待用户手动登录。
-- 首次登录后会复用默认 `chromium_user_data`，后续通常无需重复登录（会话过期除外）。
-
-## 注意
-- GitHub 页面 class 经常变化，脚本尽量使用 `aria-label`/`data-testid`/可见文本定位。
-- 如页面结构变化，优先用 MCP 方式实时抓取元素 uid 来适配。
-
-
-## 稳定运行建议（强制 venv 隔离）
-
-- macOS/Linux：优先执行 `run_macos_linux.sh`（会在 skill 目录创建 `.venv` 并安装依赖）
-- Windows：优先执行 `run_windows.cmd`（会在 skill 目录创建 `.venv` 并安装依赖）
-
-
-## Platform 必填字段支持
-
-- 若 GitHub Issue Forms 存在必填 `Platform` 下拉，脚本将自动选择当前系统对应的选项。
-- 也可在 `work_order.json` 增加 `platform` 明确指定（例如 `Windows` / `Linux` / `macOS (Apple Silicon)` / `macOS (Intel)`）。
-
-
-## 不阻塞填写 & 失败重试
-- 字段填写采用 best-effort，不会为单个字段长时间等待。
-- 点击 Create 后若仍停留在创建页面（可能校验失败），最多重试 3 次。
-- 每次失败会在 `artifacts/` 记录截图与 HTML，之后关闭浏览器并退出。
-
-
-## YAML 驱动回填
-
-- 模板文件位于 `assets/templates/`。
-- 推荐 work_order.json 使用模板 field `id` 作为键。
-
-
-## Playwright 安装与浏览器缓存策略
-
-- 依赖安装后需执行 `python -m playwright install chromium` 下载浏览器。
-- 入口脚本已内置该步骤，并带默认重试（指数退避）。
-- 若下载仍失败，入口脚本会自动尝试回退到系统已安装浏览器（Chrome/Chromium）。
-- 若已准备好浏览器缓存，可设置 `SKIP_PLAYWRIGHT_INSTALL=1` 跳过下载。
-
-## 可选环境变量
-- `SKIP_PLAYWRIGHT_INSTALL=1`：跳过 Playwright 浏览器下载（已预置浏览器缓存时使用）
-- `PAUSE_BEFORE_SUBMIT_SEC=10`：填表后暂停秒数（默认 10）
-- `PYTHON_BIN=python3`：仅 macOS/Linux 下可指定 Python 解释器
-- `PLAYWRIGHT_INSTALL_RETRIES=3`：浏览器下载失败重试次数（默认 3）
-- `PLAYWRIGHT_INSTALL_RETRY_DELAY_SEC=2`：重试基础等待秒数（指数退避）
-- `PLAYWRIGHT_INSTALL_TIMEOUT_SEC=240`：单次浏览器下载超时秒数（默认 240）
-- `BOOTSTRAP_UPGRADE_PIP=1`：需要时才升级 pip（默认不升级，弱网更稳）
-- `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE`：手动覆盖 Playwright 平台（一般不需要；macOS arm64 入口脚本会自动设置）
-
-
-## 防止重复提交死循环
-
-- `work_order.json` 增加字段：`issue_number`、`issue_url`（默认空）。
-- 脚本提交成功后会回写这两个字段；如果 `issue_number/issue_url` 已存在且未指定 `--force`，脚本将直接退出，避免重复创建。
-- 附件准备还会回写：
-  - `attachment_markdown`：GitHub 已托管的 Markdown 片段
-  - `attachment_upload_status`：`uploaded` / `listed_local` / `missing_files` / `upload_failed`
-- 运行过程还会回写：
-  - `runtime.*`：当前状态、最近一次提交器、日志路径、计数器
-  - `events[]`：append-only 过程/报错历史
-
-
-## 产物位置
-
-- `work_order.json`：由 agent 生成，放在你的工作目录（你能看到/回顾）。
-- `artifacts/`：脚本运行产物，默认与 work_order.json 同目录（包含截图、HTML、校验报告、附件准备调试页面等）。
-- `.venv`：在 skill 目录内创建（隔离依赖）。
-- `chromium_user_data`：默认存放在用户配置目录（复用登录态，避免反复登录）。
-
-
-- 日志：`artifacts/run.log`（脚本会把 stdout/stderr tee 到该文件，便于 runner 不显示输出时排查）。
-
-- 入口状态文件：Windows 写 `artifacts/cmd_status.txt`；macOS/Linux 写 `artifacts/sh_status.txt`。
+## 说明
+- 已删除旧的 base64 附件准备脚本，避免和 `github_mcp` 新链路混淆
+- 如果需要整体流程、三种提交器矩阵或回落规则，请看 `AGENT_PROMPT.md`

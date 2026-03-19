@@ -14,6 +14,6 @@ if %ERRORLEVEL% EQU 0 (
   set "PYTHON_BIN=py -3"
 )
 
-%PYTHON_BIN% "%ROOT%scripts\python\bootstrap.py" %*
+%PYTHON_BIN% "%ROOT%scripts\python\skill_bootstrap.py" %*
 
 endlocal & exit /b %ERRORLEVEL%

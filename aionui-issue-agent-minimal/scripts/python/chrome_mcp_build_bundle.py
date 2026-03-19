@@ -13,6 +13,7 @@ from issue_payload_support import (
     append_work_order_event,
     build_issue_body_markdown,
     build_local_attachment_markdown,
+    derive_attachment_upload_status,
     ensure_work_order_runtime,
     field_label,
     field_type,
@@ -26,14 +27,10 @@ from issue_payload_support import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build submitter-specific bundle from work_order.json.")
-    parser.add_argument("--work-order", required=True, help="Path to work_order.json")
-    parser.add_argument(
-        "--submitter",
-        required=True,
-        choices=["skill", "chrome_mcp", "github_mcp"],
-        help="Target submitter to build for",
+    parser = argparse.ArgumentParser(
+        description="Build chrome_mcp field bundle from work_order.json."
     )
+    parser.add_argument("--work-order", required=True, help="Path to work_order.json")
     parser.add_argument("--output", help="Optional output JSON file path")
     return parser.parse_args()
 
@@ -55,6 +52,12 @@ def main() -> int:
     attachment_markdown = str(norm.get("attachment_markdown") or "").strip()
     local_attachment_markdown = build_local_attachment_markdown(attachment_paths, missing_paths, skipped)
     attachment_block = attachment_markdown or local_attachment_markdown
+    attachment_status = derive_attachment_upload_status(
+        raw.get("attachment_upload_status") or "",
+        attachment_markdown=attachment_markdown,
+        existing_paths=attachment_paths,
+        missing_paths=missing_paths,
+    )
 
     base = {
         "schema_version": raw.get("schema_version") or "",
@@ -65,47 +68,33 @@ def main() -> int:
         "issue_type": norm.get("issue_type", "bug"),
         "title": norm.get("title", ""),
         "template_url": f"{raw.get('project_url') or AIONUI_URL}/issues/new?template={template_filename}",
-        "attachment_upload_status": raw.get("attachment_upload_status") or ("uploaded" if attachment_markdown else "none"),
+        "attachment_upload_status": attachment_status,
     }
 
-    if args.submitter == "github_mcp":
-        bundle = {
-            **base,
-            "submitter": "github_mcp",
-            "body": build_issue_body_markdown(norm, tpl, attachment_markdown=attachment_block),
-        }
-    elif args.submitter == "chrome_mcp":
-        fields = []
-        for field in all_fields_from_template(tpl):
-            field_id = str(field.get("id") or "")
-            value = str(norm.get(field_id) or "")
-            if field_id == "additional_context":
-                value = build_issue_body_markdown({"additional_context": value}, {"body": [field]}, attachment_markdown=attachment_block)
-                value = value.replace("## " + field_label(field) + "\n", "", 1).strip()
-            fields.append(
-                {
-                    "id": field_id,
-                    "label": field_label(field),
-                    "type": field_type(field),
-                    "value": value,
-                }
+    fields = []
+    for field in all_fields_from_template(tpl):
+        field_id = str(field.get("id") or "")
+        value = str(norm.get(field_id) or "")
+        if field_id == "additional_context":
+            value = build_issue_body_markdown(
+                {"additional_context": value},
+                {"body": [field]},
+                attachment_markdown=attachment_block,
             )
-        bundle = {
-            **base,
-            "submitter": "chrome_mcp",
-            "fields": fields,
-        }
-    else:
-        bundle = {
-            **base,
-            "submitter": "skill",
-            "command": [
-                "bash",
-                "run_macos_linux.sh",
-                str(work_order_path),
-            ],
-            "artifacts_dir": str((work_order_path.parent / "artifacts").resolve()),
-        }
+            value = value.replace("## " + field_label(field) + "\n", "", 1).strip()
+        fields.append(
+            {
+                "id": field_id,
+                "label": field_label(field),
+                "type": field_type(field),
+                "value": value,
+            }
+        )
+    bundle = {
+        **base,
+        "submitter": "chrome_mcp",
+        "fields": fields,
+    }
 
     if args.output:
         output_path = Path(args.output).expanduser().resolve()
@@ -118,8 +107,8 @@ def main() -> int:
     update_work_order_runtime(
         work_order_path,
         {
-            "status": "bundle_ready",
-            "last_submitter": args.submitter,
+            "status": "chrome_bundle_ready",
+            "last_submitter": "chrome_mcp",
             "last_payload_path": payload_path,
             "last_error": "",
             "last_error_at": "",
@@ -127,10 +116,10 @@ def main() -> int:
     )
     append_work_order_event(
         work_order_path,
-        stage="bundle_build",
+        stage="chrome_bundle_build",
         status="succeeded",
-        submitter=args.submitter,
-        message=f"Built submitter bundle for {args.submitter}.",
+        submitter="chrome_mcp",
+        message="Built chrome_mcp field bundle from work_order.json.",
         artifacts_dir=str((work_order_path.parent / "artifacts").resolve()),
         extra={"output_path": payload_path},
     )

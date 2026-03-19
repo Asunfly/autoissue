@@ -184,6 +184,10 @@ def _extract_cli_value(args: List[str], key: str) -> Optional[str]:
     return None
 
 
+def _has_cli_option(args: List[str], key: str) -> bool:
+    return any(arg == key or arg.startswith(f"{key}=") for arg in args)
+
+
 def _iso_now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
 
@@ -346,22 +350,22 @@ def main() -> int:
         override_path = Path(artifacts_override)
         final_artifacts = override_path if override_path.is_absolute() else (work_dir / override_path)
 
-    submit_script = root / "scripts" / "python" / "submit_aionui_issue.py"
+    submit_script = root / "scripts" / "python" / "skill_submit_aionui_issue.py"
     cmd = [
         str(venv_py),
         str(submit_script),
         "--work-order",
         str(work_order),
-        "--user-data-dir",
-        str(user_data_dir),
     ]
-    has_artifacts_arg = any(a == "--artifacts-dir" or a.startswith("--artifacts-dir=") for a in extra_args)
+    if not _has_cli_option(extra_args, "--user-data-dir"):
+        cmd += ["--user-data-dir", str(user_data_dir)]
+    has_artifacts_arg = _has_cli_option(extra_args, "--artifacts-dir")
     if not has_artifacts_arg:
         cmd += ["--artifacts-dir", str(artifacts)]
-    has_browser_binary_arg = any(a == "--browser-binary" or a.startswith("--browser-binary=") for a in extra_args)
+    has_browser_binary_arg = _has_cli_option(extra_args, "--browser-binary")
     if fallback_browser and not has_browser_binary_arg:
         cmd += ["--browser-binary", fallback_browser]
-    if "--pause-before-submit-sec" not in extra_args:
+    if not _has_cli_option(extra_args, "--pause-before-submit-sec"):
         cmd += ["--pause-before-submit-sec", str(pause_sec)]
     cmd += extra_args
     code = subprocess.call(cmd)

@@ -12,6 +12,7 @@ from issue_payload_support import (
     append_work_order_event,
     build_issue_body_markdown,
     build_local_attachment_markdown,
+    derive_attachment_upload_status,
     ensure_work_order_runtime,
     filter_uploadable_attachments,
     load_issue_template,
@@ -23,7 +24,9 @@ from issue_payload_support import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build payload JSON for github_mcp issue creation.")
+    parser = argparse.ArgumentParser(
+        description="Build title/body payload for github_mcp issue creation."
+    )
     parser.add_argument("--work-order", required=True, help="Path to work_order.json")
     parser.add_argument("--output", help="Optional output JSON file path")
     return parser.parse_args()
@@ -46,16 +49,12 @@ def main() -> int:
     if not attachment_markdown:
         _, skipped = filter_uploadable_attachments(attachment_paths)
         attachment_markdown = build_local_attachment_markdown(attachment_paths, missing_paths, skipped)
-    raw_status = str(raw.get("attachment_upload_status") or "").strip().lower()
-    if raw_status in ("", "none"):
-        if norm.get("attachment_markdown"):
-            raw_status = "uploaded"
-        elif missing_paths:
-            raw_status = "missing_files"
-        elif attachment_paths:
-            raw_status = "listed_local"
-        else:
-            raw_status = "none"
+    raw_status = derive_attachment_upload_status(
+        raw.get("attachment_upload_status") or "",
+        attachment_markdown=str(norm.get("attachment_markdown") or ""),
+        existing_paths=attachment_paths,
+        missing_paths=missing_paths,
+    )
 
     payload = {
         "owner_repo": raw.get("owner_repo") or AIONUI_REPO,

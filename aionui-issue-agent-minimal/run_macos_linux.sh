@@ -12,4 +12,4 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   PYTHON_BIN="python"
 fi
 
-exec "$PYTHON_BIN" "$ROOT/scripts/python/bootstrap.py" "$@"
+exec "$PYTHON_BIN" "$ROOT/scripts/python/skill_bootstrap.py" "$@"

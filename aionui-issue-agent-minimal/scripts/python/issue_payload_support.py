@@ -18,7 +18,13 @@ SUPPORTED_IMAGE_EXTENSIONS = {".png", ".gif", ".jpg", ".jpeg"}
 MAX_GITHUB_IMAGE_BYTES = 10 * 1024 * 1024
 
 DEFAULT_ASSETS_REPO_NAME = "issue-assets"
-GITHUB_RAW_URL_TEMPLATE = "https://raw.githubusercontent.com/{login}/{repo}/main/{path}"
+DEFAULT_ASSETS_REPO_BRANCH = "main"
+GITHUB_RAW_URL_TEMPLATE = "https://raw.githubusercontent.com/{login}/{repo}/{branch}/{path}"
+ATTACHMENT_UPLOAD_METHOD_REPO = "repo"
+ATTACHMENT_UPLOAD_METHOD_BROWSER = "browser"
+SUBMITTER_SKILL = "skill"
+SUBMITTER_CHROME_MCP = "chrome_mcp"
+SUBMITTER_GITHUB_MCP = "github_mcp"
 
 
 def iso_now() -> str:
@@ -212,6 +218,57 @@ def filter_uploadable_attachments(paths: List[Path]) -> Tuple[List[Path], List[D
             continue
         uploadable.append(path)
     return uploadable, skipped
+
+
+def split_owner_repo(owner_repo: str) -> Tuple[str, str]:
+    parts = str(owner_repo or "").split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(
+            f"owner_repo must be 'owner/repo' (exactly one /), got: {owner_repo!r}"
+        )
+    return parts[0], parts[1]
+
+
+def build_assets_repo_attachment_path(owner_repo: str, work_id: str, filename: str) -> str:
+    owner, repo = split_owner_repo(owner_repo)
+    if not str(work_id or "").strip():
+        raise ValueError("work_id is required to build attachment path")
+    if not str(filename or "").strip():
+        raise ValueError("filename is required to build attachment path")
+    return f"{owner}/{repo}/{work_id}/{filename}"
+
+
+def build_github_raw_url(
+    login: str,
+    repo: str,
+    path: str,
+    branch: str = DEFAULT_ASSETS_REPO_BRANCH,
+) -> str:
+    return GITHUB_RAW_URL_TEMPLATE.format(
+        login=login,
+        repo=repo,
+        branch=branch,
+        path=path,
+    )
+
+
+def derive_attachment_upload_status(
+    raw_status: str,
+    *,
+    attachment_markdown: str,
+    existing_paths: List[Path],
+    missing_paths: List[str],
+) -> str:
+    normalized = str(raw_status or "").strip().lower()
+    if normalized and normalized != "none":
+        return normalized
+    if str(attachment_markdown or "").strip():
+        return "uploaded"
+    if existing_paths:
+        return "listed_local"
+    if missing_paths:
+        return "missing_files"
+    return "none"
 
 
 def build_local_attachment_markdown(

@@ -43,7 +43,7 @@ Example:
 - attachment_markdown: string (optional; content generated after uploading attachments to GitHub, may be Markdown or GitHub-returned HTML `<img ...>` snippet)
 - attachment_upload_status: string (optional; `uploaded` / `listed_local` / `missing_files` / `upload_failed` / `none`)
 - attachment_upload_method: string (optional; `"repo"` / `"browser"` / `""`)
-  - `"repo"`: uploaded to the user's `{login}/issue-assets` public repo via GitHub Content API (github_mcp path)
+  - `"repo"`: uploaded to the user's `{login}/issue-assets` public repo via `git clone + binary copy + git push` (github_mcp path)
   - `"browser"`: uploaded via Playwright browser to GitHub Issue Form (skill path)
 - attachment_repo: string (optional; e.g. `"Asunfly/issue-assets"`, records which assets repo was used)
 - Upload filter: `.png` / `.gif` / `.jpg` / `.jpeg`, max `10MB` per file
