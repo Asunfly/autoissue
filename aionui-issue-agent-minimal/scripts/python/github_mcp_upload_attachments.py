@@ -41,6 +41,7 @@ from issue_payload_support import (
     build_github_raw_url,
     build_repo_attachment_markdown,
     derive_attachment_upload_status,
+    ensure_work_order_attachments,
     ensure_work_order_runtime,
     filter_uploadable_attachments,
     normalize_work_order_dict,
@@ -245,6 +246,7 @@ def main() -> int:
         return 1
 
     runtime_data = ensure_work_order_runtime(work_order_path)
+    ensure_work_order_attachments(work_order_path)
     raw = json.loads(work_order_path.read_text(encoding="utf-8"))
     norm = normalize_work_order_dict(raw)
     current_prepare_count = int(runtime_data["runtime"].get("prepare_count") or 0)

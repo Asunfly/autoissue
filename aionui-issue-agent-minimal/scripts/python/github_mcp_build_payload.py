@@ -13,6 +13,7 @@ from issue_payload_support import (
     build_issue_body_markdown,
     build_local_attachment_markdown,
     derive_attachment_upload_status,
+    ensure_work_order_attachments,
     ensure_work_order_runtime,
     filter_uploadable_attachments,
     load_issue_template,
@@ -36,6 +37,7 @@ def main() -> int:
     args = parse_args()
     work_order_path = Path(args.work_order).expanduser().resolve()
     ensure_work_order_runtime(work_order_path)
+    ensure_work_order_attachments(work_order_path)
     raw = json.loads(work_order_path.read_text(encoding="utf-8"))
     norm = normalize_work_order_dict(raw)
 

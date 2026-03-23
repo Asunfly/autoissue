@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import platform as py_platform
 import uuid
 from pathlib import Path
@@ -15,6 +16,17 @@ AIONUI_REPO = "iOfficeAI/AionUi"
 AIONUI_URL = "https://github.com/iOfficeAI/AionUi"
 WORK_ORDER_SCHEMA_VERSION = "v24"
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".gif", ".jpg", ".jpeg"}
+DISCOVERABLE_ATTACHMENT_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS | {".webp", ".bmp", ".svg", ".heic", ".heif"}
+AUTO_ATTACHMENT_EXCLUDED_DIRS = {
+    "artifacts",
+    ".venv",
+    "chromium_user_data",
+    "__pycache__",
+    ".git",
+    ".idea",
+    ".vscode",
+    "node_modules",
+}
 MAX_GITHUB_IMAGE_BYTES = 10 * 1024 * 1024
 
 DEFAULT_ASSETS_REPO_NAME = "issue-assets"
@@ -198,6 +210,76 @@ def resolve_attachment_paths(attachments: List[str], base_dir: Path) -> Tuple[Li
         else:
             missing.append(str(candidate))
     return existing, missing
+
+
+def _resolve_attachment_candidate(raw: str, base_dir: Path) -> Path:
+    candidate = Path(str(raw)).expanduser()
+    if not candidate.is_absolute():
+        candidate = base_dir / candidate
+    return candidate.resolve()
+
+
+def _work_order_attachment_entry(path: Path, base_dir: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(base_dir.resolve()).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def discover_workspace_attachments(base_dir: Path) -> List[Path]:
+    if not base_dir.is_dir():
+        return []
+
+    discovered: List[Path] = []
+    for root, dirs, files in os.walk(base_dir):
+        dirs[:] = sorted(d for d in dirs if d not in AUTO_ATTACHMENT_EXCLUDED_DIRS)
+        for filename in sorted(files):
+            path = Path(root) / filename
+            if path.name == "work_order.json":
+                continue
+            if path.suffix.lower() not in DISCOVERABLE_ATTACHMENT_EXTENSIONS:
+                continue
+            discovered.append(path.resolve())
+    return discovered
+
+
+def ensure_work_order_attachments(path: Path) -> Dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    changed = False
+    base_dir = path.parent.resolve()
+
+    raw_attachments = data.get("attachments")
+    attachments = raw_attachments if isinstance(raw_attachments, list) else []
+    normalized_entries: List[str] = []
+    seen_paths: set[str] = set()
+
+    for raw in attachments:
+        text = str(raw).strip()
+        if not text:
+            changed = True
+            continue
+        if text not in normalized_entries:
+            normalized_entries.append(text)
+        else:
+            changed = True
+        seen_paths.add(str(_resolve_attachment_candidate(text, base_dir)))
+
+    for discovered_path in discover_workspace_attachments(base_dir):
+        key = str(discovered_path)
+        if key in seen_paths:
+            continue
+        normalized_entries.append(_work_order_attachment_entry(discovered_path, base_dir))
+        seen_paths.add(key)
+        changed = True
+
+    if raw_attachments != normalized_entries:
+        data["attachments"] = normalized_entries
+        changed = True
+
+    if changed:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return data
 
 
 def filter_uploadable_attachments(paths: List[Path]) -> Tuple[List[Path], List[Dict[str, str]]]:
