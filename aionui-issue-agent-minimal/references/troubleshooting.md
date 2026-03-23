@@ -13,3 +13,8 @@
 
 4) 明明想再提一次，但脚本直接退出  
 - `work_order.json` 里已有 `issue_number` 或 `issue_url`（去重保护）。清空这两个字段，或传 `--force`。
+
+5) 点了 Create 后脚本报超时，但 GitHub 上其实已经有新 issue  
+- `2026-03-23` 起，`skill` 会先用多信号确认（URL、canonical/og URL、页面标题里的 `Issue #<n>`）并追加最近 issue 幂等性探测，再决定是否重试。
+- 如果仍出现疑似“假性超时”，先检查 `work_order.json` 是否已写回 `issue_number/issue_url`，以及 `artifacts/run.log` 中是否出现 `SUCCESS [page_title]`、`SUCCESS [github_api_recent_exact_title]` 之类的恢复日志。
+- 如果页面信号和最近 issue 探测都失败，再看 `artifacts/submit_attempt_*.html` 判断是 GitHub UI 变化、网络异常，还是确实没有创建成功。

@@ -1,4 +1,4 @@
-# AionUi Issue Agent（最简分支：固定仓库 iOfficeAI/AionUi，v24）
+# AionUi Issue Agent（最简分支：固定仓库 iOfficeAI/AionUi，schema v24 / submitter update 2026-03-23）
 
 > 用途：把用户的图文问题描述自动整理成 GitHub Issue 草稿，并在用户明确要求"提交/发布/一键提交"时提交到固定仓库：
 > https://github.com/iOfficeAI/AionUi
@@ -87,6 +87,7 @@
   - `attachments`: 文件路径数组（可为空）
   - `issue_number`: `""`
   - `issue_url`: `""`
+- 生成 `work_order.json` 时，Agent 应把当前 `work_id` 工作目录内与该 issue 相关的截图路径显式写入 `attachments`；不要只写其中一张。
 - 可选附件衍生字段：
   - `attachment_markdown`: 已上传到 GitHub 后生成的 Markdown 片段
   - `attachment_upload_status`: `uploaded` / `listed_local` / `missing_files` / `upload_failed` / `none`
@@ -111,9 +112,16 @@
   - 推荐：生成一个新的 `work_id` 和新的 `work_order.json`
   - 或者：清空旧 `work_order.json` 的 `issue_number/issue_url`，或在你明确知道后果时使用 `--force`
 
+## Skill 提交确认（2026-03-23 更新，schema 仍为 v24）
+- 这次更新只调整 `skill` 提交器的成功判定与重试策略，不改 `work_order.json` 字段结构，因此 `schema_version` 继续保持 `v24`。
+- 点击 Create 后，`skill` 不再只依赖 URL 是否立刻跳到 `/issues/<number>`；会同时检查当前 URL、页面 canonical/og URL，以及页面标题或标题区里的 `Issue #<number>` 信号。
+- 若短时间内仍未拿到明确跳转，`skill` 会先静默等待更长时间（15-45 秒，受 `--timeout-sec` 限制），然后再对仓库最近创建的 issue 做一次“按标题精确匹配”的幂等性探测。
+- 只有页面信号和最近 issue 探测都失败时，才会进入下一次重试，从而降低“Issue 已成功创建，但脚本误判失败又重复点击”的风险。
+
 ## 附件准备阶段（所有提交器共用）
 - `attachments` 始终保存原始本地路径，作为事实来源。
 - `attachments` 可以是绝对路径，也可以是相对 `work_order.json` 的路径；当前实现不要求附件必须位于 `work_id` 目录内。
+- 如果 `attachments` 漏掉了当前 `work_id` 工作目录中的图片文件，脚本会在进入提交器前自动补回，但仍应以 Agent 在 `work_order.json` 阶段显式写全为主。
 - 若本地截图/录屏/日志需要真正跟随 issue 发布，先准备 `attachment_markdown`，不要把本地路径直接交给 `github_mcp`。
 - 预上传前会先过滤 GitHub 当前支持的图片：`.png`、`.gif`、`.jpg`、`.jpeg`，且单文件不超过 `10MB`。
 - 不支持或超限的附件只跳过上传，不阻断本次 issue；需在回复中说明它们仅以本地路径形式保留。

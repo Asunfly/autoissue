@@ -2,6 +2,7 @@
 
 v24 adds repo-based attachment upload for github_mcp (no browser needed).
 Uses YAML-driven fill based on GitHub Issue Forms templates under `assets/templates/`.
+`2026-03-23` 的 skill 提交恢复更新不改变字段结构，因此 schema 版本仍保持 `v24`。
 
 ## Core rule for multi-issue sessions
 - `work_order.json` is now defined as **one issue = one work order**.
@@ -37,9 +38,17 @@ Example:
 - issue_number: string (default empty). If non-empty, script skips submission (unless `--force`).
 - issue_url: string (set after success). If issue_number is empty but issue_url exists, script parses issue number and skips (unless `--force`).
 
+## Skill submit confirmation (2026-03-23 behavior update)
+- This behavior update does not add or remove schema fields; it only changes how the Playwright submitter confirms success before retrying.
+- After clicking Create, the `skill` submitter now checks multiple success signals: current URL, canonical/og URL, and page title or heading text containing `Issue #<number>`.
+- If the redirect is slow, the submitter waits longer (15-45 seconds, capped by `--timeout-sec`) before deciding the attempt is ambiguous.
+- Before any retry, the submitter performs a recent-issues probe against the target repo and looks for an exact title match inside the recent creation window to avoid duplicate submission.
+
 ## Attachment preparation
 - attachments: string[] (local file paths; may be absolute or relative to work_order.json)
 - Only the current work order's `attachments` are consumed during prepare/submit; other `work_id` histories must be ignored.
+- The agent should explicitly write all known attachment paths into `attachments` when generating `work_order.json`.
+- As a safety net, the scripts auto-augment `attachments` from the current `work_id` workspace before submit/payload build, but only for discoverable image files outside internal directories such as `artifacts`, `.venv`, and `chromium_user_data`.
 - attachment_markdown: string (optional; content generated after uploading attachments to GitHub, may be Markdown or GitHub-returned HTML `<img ...>` snippet)
 - attachment_upload_status: string (optional; `uploaded` / `listed_local` / `missing_files` / `upload_failed` / `none`)
 - attachment_upload_method: string (optional; `"repo"` / `"browser"` / `""`)
