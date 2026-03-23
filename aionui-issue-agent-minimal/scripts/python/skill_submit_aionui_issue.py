@@ -10,9 +10,11 @@ import platform as py_platform
 import re
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 from playwright.sync_api import Error as PlaywrightError
@@ -22,6 +24,7 @@ from playwright.sync_api import sync_playwright
 from issue_payload_support import (
     append_work_order_event,
     build_local_attachment_markdown,
+    ensure_work_order_attachments,
     ensure_work_order_runtime,
     filter_uploadable_attachments,
     merge_markdown_blocks,
@@ -33,6 +36,10 @@ from issue_payload_support import (
 
 AIONUI_REPO = "iOfficeAI/AionUi"
 AIONUI_URL = "https://github.com/iOfficeAI/AionUi"
+GITHUB_API_BASE = "https://api.github.com"
+SUBMIT_RESULT_WAIT_SEC_MIN = 15
+SUBMIT_RESULT_WAIT_SEC_MAX = 45
+RECENT_ISSUE_LOOKBACK_SEC = 120
 
 
 # ---------------------------
@@ -117,6 +124,14 @@ class WorkOrder:
     # Common
     attachments: List[str] = None
     raw: Dict[str, Any] = None
+
+
+@dataclass
+class SubmissionSuccessInfo:
+    issue_url: str
+    issue_number: str
+    detection_method: str
+    evidence: str = ""
 
 
 def _infer_platform_default() -> str:
@@ -315,24 +330,30 @@ def get_text_control_value(el) -> str:
     return ""
 
 
-def _extract_uploaded_attachment_markdown(before: str, after: str) -> str:
-    before = (before or "").strip()
-    after = (after or "").strip()
-    if not after:
-        return ""
-    if before and after.startswith(before):
-        return after[len(before):].strip()
+def _extract_uploaded_attachment_lines(text: str) -> List[str]:
+    lines: List[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("<!-- Uploading "):
+            continue
+        if "<img" in line and "src=" in line:
+            lines.append(line)
+            continue
+        if "http" not in line:
+            continue
+        if "![" in line or "](" in line:
+            lines.append(line)
+    return lines
 
-    lines = []
-    for line in after.splitlines():
-        text = line.strip()
-        if text.startswith("<!-- Uploading "):
-            continue
-        if "http" not in text:
-            continue
-        if "![" in text or "](" in text or ("<img" in text and "src=" in text):
-            lines.append(text)
-    return "\n".join(lines).strip()
+
+def _extract_uploaded_attachment_markdown(before: str, after: str) -> str:
+    before_lines = _extract_uploaded_attachment_lines(before)
+    after_lines = _extract_uploaded_attachment_lines(after)
+    remaining = list(after_lines)
+    for line in before_lines:
+        with contextlib.suppress(ValueError):
+            remaining.remove(line)
+    return "\n".join(remaining).strip()
 
 
 def find_attachment_input_for_control(control):
@@ -385,6 +406,8 @@ def upload_attachments_to_control(page, control, attachment_paths: List[Path], t
         return get_text_control_value(control), ""
 
     before = get_text_control_value(control)
+    baseline_count = len(_extract_uploaded_attachment_lines(before))
+    expected_total = baseline_count + len(attachment_paths)
     file_input = find_attachment_input_for_control(control)
     if file_input is not None:
         with contextlib.suppress(Exception):
@@ -402,13 +425,8 @@ def upload_attachments_to_control(page, control, attachment_paths: List[Path], t
     while time.time() < deadline:
         time.sleep(0.5)
         after = get_text_control_value(control)
-        lower_after = after.lower()
-        if after != before and (
-            "user-attachments" in lower_after
-            or "<img" in lower_after
-            or "](" in lower_after
-            or "![" in lower_after
-        ):
+        uploaded_count = len(_extract_uploaded_attachment_lines(after))
+        if uploaded_count >= expected_total:
             break
 
     return after, _extract_uploaded_attachment_markdown(before, after)
@@ -537,6 +555,183 @@ def is_issue_created_url(url: str) -> bool:
 def _extract_issue_number_from_url(url: str) -> str:
     m = re.search(r"/issues/(\d+)(?:$|[/?#])", url or "")
     return m.group(1) if m else ""
+
+
+def _extract_issue_number_from_text(text: str) -> str:
+    m = re.search(r"\bIssue\s*#\s*(\d+)\b", text or "", flags=re.IGNORECASE)
+    return m.group(1) if m else ""
+
+
+def _normalize_issue_url(url: str, project_url: str) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return ""
+    if value.startswith("//"):
+        return "https:" + value
+    if value.startswith("/"):
+        return project_url.rstrip("/") + value
+    return value
+
+
+def _build_issue_url(project_url: str, issue_number: str) -> str:
+    if not str(issue_number or "").strip():
+        return ""
+    return f"{project_url.rstrip('/')}/issues/{issue_number}"
+
+
+def _summarize_submission_signals(signals: Dict[str, str]) -> str:
+    parts: List[str] = []
+    for key in ("current_url", "canonical_url", "og_url", "page_title", "heading_text", "body_issue_hint"):
+        value = str(signals.get(key) or "").strip()
+        if not value:
+            continue
+        compact = re.sub(r"\s+", " ", value)
+        if len(compact) > 160:
+            compact = compact[:157] + "..."
+        parts.append(f"{key}={compact!r}")
+    return "; ".join(parts)
+
+
+def _collect_submission_signals(page, project_url: str) -> Dict[str, str]:
+    signals: Dict[str, str] = {
+        "current_url": _normalize_issue_url(getattr(page, "url", "") or "", project_url),
+        "canonical_url": "",
+        "og_url": "",
+        "page_title": "",
+        "heading_text": "",
+        "body_issue_hint": "",
+    }
+    with contextlib.suppress(Exception):
+        signals["page_title"] = str(page.title() or "").strip()
+    with contextlib.suppress(Exception):
+        raw = page.evaluate(
+            """() => {
+                const canonical = document.querySelector('link[rel="canonical"]')?.href || "";
+                const ogUrl = document.querySelector('meta[property="og:url"]')?.content || "";
+                const heading =
+                    document.querySelector('main h1')?.innerText ||
+                    document.querySelector('h1')?.innerText ||
+                    "";
+                const bodyText = document.body ? document.body.innerText : "";
+                const issueHintMatch = bodyText.match(/\\bIssue\\s*#\\s*\\d+\\b/i);
+                return {
+                    canonical_url: canonical,
+                    og_url: ogUrl,
+                    heading_text: heading,
+                    body_issue_hint: issueHintMatch ? issueHintMatch[0] : "",
+                };
+            }"""
+        )
+        if isinstance(raw, dict):
+            for key in ("canonical_url", "og_url", "heading_text", "body_issue_hint"):
+                signals[key] = str(raw.get(key) or "").strip()
+    return signals
+
+
+def detect_issue_submission_success(page, project_url: str) -> Optional[SubmissionSuccessInfo]:
+    signals = _collect_submission_signals(page, project_url)
+    current_url = signals.get("current_url", "")
+    if is_issue_created_url(current_url):
+        return SubmissionSuccessInfo(
+            issue_url=current_url,
+            issue_number=_extract_issue_number_from_url(current_url),
+            detection_method="current_url",
+            evidence=_summarize_submission_signals(signals),
+        )
+
+    for key in ("canonical_url", "og_url"):
+        candidate = _normalize_issue_url(signals.get(key, ""), project_url)
+        if is_issue_created_url(candidate):
+            return SubmissionSuccessInfo(
+                issue_url=candidate,
+                issue_number=_extract_issue_number_from_url(candidate),
+                detection_method=key,
+                evidence=_summarize_submission_signals(signals),
+            )
+
+    for key in ("page_title", "heading_text", "body_issue_hint"):
+        issue_number = _extract_issue_number_from_text(signals.get(key, ""))
+        if not issue_number:
+            continue
+        return SubmissionSuccessInfo(
+            issue_url=_build_issue_url(project_url, issue_number),
+            issue_number=issue_number,
+            detection_method=key,
+            evidence=_summarize_submission_signals(signals),
+        )
+
+    return None
+
+
+def _parse_github_timestamp(value: str) -> Optional[datetime.datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    with contextlib.suppress(ValueError):
+        return datetime.datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(datetime.timezone.utc)
+    return None
+
+
+def find_recent_issue_by_title(
+    owner_repo: str,
+    title: str,
+    *,
+    project_url: str,
+    not_before: datetime.datetime,
+    timeout_sec: int,
+) -> Optional[SubmissionSuccessInfo]:
+    parts = str(owner_repo or "").split("/", 1)
+    if len(parts) != 2 or not all(parts):
+        return None
+
+    api_url = (
+        f"{GITHUB_API_BASE}/repos/{parts[0]}/{parts[1]}/issues"
+        "?state=all&per_page=20&sort=created&direction=desc"
+    )
+    request = urllib.request.Request(
+        api_url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "aionui-issue-agent-minimal/submit-probe",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    wanted_title = re.sub(r"\s+", " ", str(title or "")).strip().casefold()
+    if not wanted_title:
+        return None
+    probe_timeout = max(5, min(timeout_sec, 15))
+
+    try:
+        with urllib.request.urlopen(request, timeout=probe_timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return None
+
+    if not isinstance(payload, list):
+        return None
+
+    cutoff = not_before.astimezone(datetime.timezone.utc)
+    for item in payload:
+        if not isinstance(item, dict) or item.get("pull_request"):
+            continue
+        candidate_title = re.sub(r"\s+", " ", str(item.get("title") or "")).strip().casefold()
+        if candidate_title != wanted_title:
+            continue
+        created_at = _parse_github_timestamp(str(item.get("created_at") or ""))
+        if created_at and created_at < cutoff:
+            continue
+        issue_url = str(item.get("html_url") or "").strip()
+        issue_number = str(item.get("number") or "").strip() or _extract_issue_number_from_url(issue_url)
+        if not issue_url or not issue_number:
+            continue
+        created_hint = created_at.isoformat() if created_at else str(item.get("created_at") or "")
+        return SubmissionSuccessInfo(
+            issue_url=issue_url,
+            issue_number=issue_number,
+            detection_method="github_api_recent_exact_title",
+            evidence=f"title={str(item.get('title') or '').strip()!r}; created_at={created_hint!r}",
+        )
+    return None
 
 
 def _write_back_defaults_if_needed(path: Path, updates: Dict[str, Any]) -> None:
@@ -713,6 +908,47 @@ def _disable_run_logging(state) -> None:
         log_file.close()
 
 
+def _record_submission_success(
+    work_order_path: Path,
+    artifacts: Path,
+    args: argparse.Namespace,
+    result: SubmissionSuccessInfo,
+) -> int:
+    print(f"SUCCESS [{result.detection_method}]: {result.issue_url}")
+    if result.evidence:
+        print(f"[INFO] Submission evidence: {result.evidence}")
+    _update_work_order_file(work_order_path, result.issue_url)
+    update_work_order_runtime(
+        work_order_path,
+        {
+            "status": "submitted",
+            "last_error": "",
+            "last_error_at": "",
+        },
+        {
+            "issue_url": result.issue_url,
+            "issue_number": result.issue_number,
+        },
+    )
+    append_work_order_event(
+        work_order_path,
+        stage="submit",
+        status="succeeded",
+        submitter="skill",
+        message=f"Issue created successfully via {result.detection_method}.",
+        issue_url=result.issue_url,
+        issue_number=result.issue_number,
+        artifacts_dir=str(artifacts.resolve()),
+        extra={
+            "detection_method": result.detection_method,
+            "evidence": result.evidence,
+        },
+    )
+    if not args.headless:
+        time.sleep(10)
+    return 0
+
+
 # ---------------------------
 # CLI
 # ---------------------------
@@ -749,6 +985,7 @@ def main() -> int:
     if not artifacts.is_absolute():
         artifacts = work_order_path.parent / artifacts
     ensure_work_order_runtime(work_order_path)
+    ensure_work_order_attachments(work_order_path)
     update_work_order_runtime(
         work_order_path,
         {
@@ -949,12 +1186,25 @@ def main() -> int:
                                 uploadable_attachment_paths,
                                 timeout_sec=max(args.timeout_sec * 2, 60),
                             )
-                            if uploaded_markdown:
+                            uploaded_count = len(_extract_uploaded_attachment_lines(uploaded_markdown))
+                            expected_upload_count = len(uploadable_attachment_paths)
+                            if uploaded_markdown and uploaded_count >= expected_upload_count:
                                 attachment_markdown = uploaded_markdown
                                 attachment_updates["attachment_markdown"] = uploaded_markdown
                                 attachment_updates["attachment_upload_status"] = "uploaded"
                                 norm["attachment_markdown"] = uploaded_markdown
                                 norm["additional_context"] = base_text
+                            elif uploaded_markdown:
+                                fallback_text = merge_markdown_blocks(base_text, uploaded_markdown, local_attachment_markdown)
+                                set_text_control(control, fallback_text)
+                                attachment_updates["attachment_upload_status"] = "upload_failed"
+                                attachment_updates["attachment_markdown"] = ""
+                                norm["additional_context"] = fallback_text
+                                print(
+                                    f"[WARN] Attachment upload incomplete: expected {expected_upload_count}, "
+                                    f"but only detected {uploaded_count} uploaded reference(s)."
+                                )
+                                ok = bool(fallback_text.strip()) or not required
                             else:
                                 fallback_text = merge_markdown_blocks(base_text, local_attachment_markdown)
                                 set_text_control(control, fallback_text)
@@ -1095,7 +1345,12 @@ def main() -> int:
                 return 0
 
             max_attempts = 3
+            submit_wait_sec = max(
+                SUBMIT_RESULT_WAIT_SEC_MIN,
+                min(int(args.timeout_sec or 0), SUBMIT_RESULT_WAIT_SEC_MAX),
+            )
             for attempt in range(1, max_attempts + 1):
+                attempt_started_at = datetime.datetime.now(datetime.timezone.utc)
                 try:
                     btn = page.locator("button[data-testid='create-issue-button']").first
                     btn.click()
@@ -1104,54 +1359,55 @@ def main() -> int:
                     save_debug(page, artifacts, f"create_click_fail_{attempt}")
                     continue
 
-                for _ in range(40):
+                success_result: Optional[SubmissionSuccessInfo] = None
+                poll_count = max(1, int((submit_wait_sec * 2)))
+                for _ in range(poll_count):
                     time.sleep(0.5)
-                    cur = page.url or ""
-                    if is_issue_created_url(cur):
-                        print(f"SUCCESS: {cur}")
-                        _update_work_order_file(work_order_path, cur)
-                        update_work_order_runtime(
-                            work_order_path,
-                            {
-                                "status": "submitted",
-                                "last_error": "",
-                                "last_error_at": "",
-                            },
-                            {
-                                "issue_url": cur,
-                                "issue_number": _extract_issue_number_from_url(cur),
-                            },
-                        )
-                        append_work_order_event(
-                            work_order_path,
-                            stage="submit",
-                            status="succeeded",
-                            submitter="skill",
-                            message="Issue created successfully.",
-                            issue_url=cur,
-                            issue_number=_extract_issue_number_from_url(cur),
-                            artifacts_dir=str(artifacts.resolve()),
-                        )
-                        if not args.headless:
-                            time.sleep(10)
-                        return 0
+                    success_result = detect_issue_submission_success(page, wo.project_url)
+                    if success_result:
+                        return _record_submission_success(work_order_path, artifacts, args, success_result)
+
+                recent_issue = find_recent_issue_by_title(
+                    wo.owner_repo,
+                    wo.title,
+                    project_url=wo.project_url,
+                    not_before=attempt_started_at - datetime.timedelta(seconds=RECENT_ISSUE_LOOKBACK_SEC),
+                    timeout_sec=submit_wait_sec,
+                )
+                if recent_issue:
+                    print(
+                        f"[INFO] Attempt {attempt}: submit result recovered from recent issue lookup "
+                        f"({recent_issue.detection_method})."
+                    )
+                    return _record_submission_success(work_order_path, artifacts, args, recent_issue)
 
                 save_debug(page, artifacts, f"submit_attempt_{attempt}")
+                observation = ""
+                with contextlib.suppress(Exception):
+                    observation = _summarize_submission_signals(_collect_submission_signals(page, wo.project_url))
                 append_work_order_event(
                     work_order_path,
                     stage="submit_attempt",
                     status="retry",
                     submitter="skill",
-                    message=f"Submit attempt {attempt} stayed on create page; retrying.",
+                    message=(
+                        f"Submit attempt {attempt} did not yield a confirmed issue after {submit_wait_sec}s; retrying."
+                    ),
                     artifacts_dir=str(artifacts.resolve()),
+                    extra={
+                        "observation": observation,
+                        "wait_sec": submit_wait_sec,
+                    },
                 )
-                print(f"Attempt {attempt}: still on create page (validation may have failed). Retrying...")
+                if observation:
+                    print(f"Attempt {attempt}: no confirmed issue yet. Observation: {observation}")
+                print(f"Attempt {attempt}: no confirmed issue after {submit_wait_sec}s. Retrying...")
 
             update_work_order_runtime(
                 work_order_path,
                 {
                     "status": "failed",
-                    "last_error": "Failed to submit after 3 attempts.",
+                    "last_error": "Failed to confirm issue creation after 3 attempts.",
                     "last_error_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat(),
                 },
             )
@@ -1160,10 +1416,10 @@ def main() -> int:
                 stage="submit",
                 status="failed",
                 submitter="skill",
-                error="Failed to submit after 3 attempts.",
+                error="Failed to confirm issue creation after 3 attempts.",
                 artifacts_dir=str(artifacts.resolve()),
             )
-            raise SystemExit("Failed to submit after 3 attempts. See artifacts/*.png and *.html for details.")
+            raise SystemExit("Failed to confirm issue creation after 3 attempts. See artifacts/*.png and *.html for details.")
 
     except PlaywrightTimeoutError as e:
         update_work_order_runtime(
