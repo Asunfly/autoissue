@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import importlib
 import importlib.util
 import json
@@ -21,6 +22,7 @@ bootstrap_mod = importlib.import_module("skill_bootstrap")
 github_payload_mod = importlib.import_module("github_mcp_build_payload")
 chrome_bundle_mod = importlib.import_module("chrome_mcp_build_bundle")
 upload_mod = importlib.import_module("github_mcp_upload_attachments")
+support_mod = importlib.import_module("issue_payload_support")
 
 
 class FakeControl:
@@ -42,50 +44,100 @@ class FakeControl:
 
 
 class FakeButton:
-    def __init__(self, page, final_url: str | None = None):
+    def __init__(self, page):
         self.page = page
-        self.final_url = final_url
 
     def click(self):
-        if self.final_url:
-            self.page.url = self.final_url
+        self.page.handle_submit_click()
 
 
 class FakeLocator:
-    def __init__(self, target):
+    def __init__(self, target=None, exists: bool = True):
         self.target = target
+        self.exists = exists
         self.first = self
 
     def fill(self, value: str):
+        if not self.exists or self.target is None:
+            raise AssertionError("Locator not found")
         self.target.fill(value)
 
     def click(self):
+        if not self.exists or self.target is None:
+            raise AssertionError("Locator not found")
         self.target.click()
 
     def input_value(self):
+        if not self.exists or self.target is None:
+            return ""
         return self.target.input_value()
 
     def text_content(self):
+        if not self.exists or self.target is None:
+            return ""
         return self.target.text_content()
 
     def count(self):
-        return 1
+        return 1 if self.exists else 0
 
 
 class FakePage:
-    def __init__(self, final_issue_url: str | None = None):
-        self.url = "https://github.com/iOfficeAI/AionUi/issues/new?template=bug_report.yml"
+    def __init__(
+        self,
+        final_issue_url: str | None = None,
+        *,
+        redirect_after_url_reads: int = 0,
+        title_after_submit: str = "",
+        heading_after_submit: str = "",
+        canonical_after_submit: str = "",
+        og_url_after_submit: str = "",
+        body_issue_hint: str = "",
+        keep_form_after_submit: bool = False,
+    ):
+        self._url = "https://github.com/iOfficeAI/AionUi/issues/new?template=bug_report.yml"
+        self.final_issue_url = final_issue_url
+        self.redirect_after_url_reads = max(0, redirect_after_url_reads)
+        self.title_after_submit = title_after_submit
+        self.heading_after_submit = heading_after_submit
+        self.canonical_after_submit = canonical_after_submit
+        self.og_url_after_submit = og_url_after_submit
+        self.body_issue_hint = body_issue_hint
+        self.keep_form_after_submit = keep_form_after_submit
+        self.submitted = False
+        self.url_reads_since_submit = 0
         self.title_control = FakeControl("title")
-        self.create_button = FakeButton(self, final_issue_url)
+        self.create_button = FakeButton(self)
+
+    @property
+    def url(self):
+        if self.submitted and self.final_issue_url and self._url != self.final_issue_url:
+            if self.url_reads_since_submit >= self.redirect_after_url_reads:
+                self._url = self.final_issue_url
+            else:
+                self.url_reads_since_submit += 1
+        return self._url
+
+    @url.setter
+    def url(self, value):
+        self._url = value
 
     def goto(self, *_args, **_kwargs):
         return None
 
+    def handle_submit_click(self):
+        self.submitted = True
+        self.url_reads_since_submit = 0
+        if self.final_issue_url and self.redirect_after_url_reads == 0:
+            self._url = self.final_issue_url
+
+    def form_visible(self) -> bool:
+        return (not self.submitted) or self.keep_form_after_submit
+
     def locator(self, selector: str):
         if selector == "input[aria-label='Add a title']":
-            return FakeLocator(self.title_control)
+            return FakeLocator(self.title_control, exists=self.form_visible())
         if selector == "button[data-testid='create-issue-button']":
-            return FakeLocator(self.create_button)
+            return FakeLocator(self.create_button, exists=self.form_visible())
         raise AssertionError(f"Unexpected selector: {selector}")
 
     def screenshot(self, *_args, **_kwargs):
@@ -93,6 +145,26 @@ class FakePage:
 
     def content(self):
         return "<html></html>"
+
+    def title(self):
+        if self.submitted and self.title_after_submit:
+            return self.title_after_submit
+        return "New issue · GitHub"
+
+    def evaluate(self, _function: str):
+        if not self.submitted:
+            return {
+                "canonical_url": "",
+                "og_url": "",
+                "heading_text": "",
+                "body_issue_hint": "",
+            }
+        return {
+            "canonical_url": self.canonical_after_submit,
+            "og_url": self.og_url_after_submit,
+            "heading_text": self.heading_after_submit,
+            "body_issue_hint": self.body_issue_hint,
+        }
 
 
 class FakeContext:
@@ -165,6 +237,7 @@ class WorkflowRegressionTests(unittest.TestCase):
         work_id: str,
         with_attachment: bool = False,
         attachment_name: str = "screen.png",
+        attachment_names: list[str] | None = None,
         attachment_bytes: bytes | None = None,
         attachment_outside_workspace: bool = False,
     ) -> Path:
@@ -173,9 +246,13 @@ class WorkflowRegressionTests(unittest.TestCase):
         artifacts_dir = workspace / "artifacts"
         attachment_dir = (self.root / "shared_attachments") if attachment_outside_workspace else workspace
         attachment_dir.mkdir(parents=True, exist_ok=True)
-        attachment_path = attachment_dir / attachment_name
+        attachment_paths: list[Path] = []
+        names = attachment_names or [attachment_name]
         if with_attachment:
-            attachment_path.write_bytes(attachment_bytes or b"fake-png")
+            for name in names:
+                attachment_path = attachment_dir / name
+                attachment_path.write_bytes(attachment_bytes or b"fake-png")
+                attachment_paths.append(attachment_path)
 
         if issue_type == "bug":
             data = {
@@ -193,7 +270,7 @@ class WorkflowRegressionTests(unittest.TestCase):
                 "expected_behavior": "应出现 loading 并可继续操作。",
                 "actual_behavior": "界面卡死。",
                 "additional_context": "复现频率高",
-                "attachments": [str(attachment_path)] if with_attachment else [],
+                "attachments": [str(path) for path in attachment_paths] if with_attachment else [],
             }
         else:
             data = {
@@ -209,7 +286,7 @@ class WorkflowRegressionTests(unittest.TestCase):
                 "proposed_solution": "发送期间禁用按钮并显示 loading。",
                 "feature_category": "UI/UX Improvement",
                 "additional_context": "用于减少误触。",
-                "attachments": [str(attachment_path)] if with_attachment else [],
+                "attachments": [str(path) for path in attachment_paths] if with_attachment else [],
             }
 
         data.update(
@@ -260,6 +337,9 @@ class WorkflowRegressionTests(unittest.TestCase):
             ]
         return {label: FakeControl(label) for label in labels}
 
+    def workspace_dir_for(self, work_order: Path) -> Path:
+        return work_order.parent
+
     def run_submit(
         self,
         work_order: Path,
@@ -268,11 +348,13 @@ class WorkflowRegressionTests(unittest.TestCase):
         final_issue_url: str | None = None,
         upload_markdown: str | None = None,
         should_timeout: bool = False,
+        recent_issue_result=None,
+        page_kwargs: dict | None = None,
     ):
         work_data = load_json(work_order)
         issue_type = work_data["issue_type"]
         controls = self.build_controls(issue_type)
-        page = FakePage(final_issue_url=final_issue_url)
+        page = FakePage(final_issue_url=final_issue_url, **(page_kwargs or {}))
 
         def fake_find_control_by_label(_page, label):
             return None, controls[label]
@@ -296,6 +378,7 @@ class WorkflowRegressionTests(unittest.TestCase):
             mock.patch.object(submit_mod, "find_control_by_label", side_effect=fake_find_control_by_label), \
             mock.patch.object(submit_mod, "select_dropdown_option", side_effect=fake_select_dropdown_option), \
             mock.patch.object(submit_mod, "upload_attachments_to_control", side_effect=fake_upload_attachments), \
+            mock.patch.object(submit_mod, "find_recent_issue_by_title", return_value=recent_issue_result), \
             mock.patch.object(submit_mod, "save_debug", return_value=None), \
             mock.patch.object(submit_mod.time, "sleep", return_value=None), \
             wait_patch, \
@@ -384,6 +467,152 @@ class WorkflowRegressionTests(unittest.TestCase):
         self.assertEqual(updated["issue_url"], "https://github.com/iOfficeAI/AionUi/issues/626")
         self.assertEqual(updated["runtime"]["status"], "submitted")
         self.assertEqual(updated["events"][-1]["status"], "succeeded")
+
+    def test_skill_submit_recovers_success_from_issue_title_before_url_redirect(self):
+        work_order = self.make_work_order("bug", "wo-submit-title-001")
+        updated, _controls = self.run_submit(
+            work_order,
+            args=[],
+            final_issue_url="https://github.com/iOfficeAI/AionUi/issues/1605",
+            page_kwargs={
+                "redirect_after_url_reads": 999,
+                "title_after_submit": "Issue #1605 · iOfficeAI/AionUi",
+            },
+        )
+
+        self.assertEqual(updated["issue_number"], "1605")
+        self.assertEqual(updated["issue_url"], "https://github.com/iOfficeAI/AionUi/issues/1605")
+        self.assertEqual(updated["runtime"]["status"], "submitted")
+        self.assertEqual(updated["events"][-1]["extra"]["detection_method"], "page_title")
+
+    def test_skill_submit_uses_recent_issue_probe_before_retry(self):
+        work_order = self.make_work_order("bug", "wo-submit-probe-001")
+        recovered_issue = submit_mod.SubmissionSuccessInfo(
+            issue_url="https://github.com/iOfficeAI/AionUi/issues/1606",
+            issue_number="1606",
+            detection_method="github_api_recent_exact_title",
+            evidence="title match within recent issue window",
+        )
+        updated, _controls = self.run_submit(
+            work_order,
+            args=[],
+            recent_issue_result=recovered_issue,
+        )
+
+        self.assertEqual(updated["issue_number"], "1606")
+        self.assertEqual(updated["issue_url"], "https://github.com/iOfficeAI/AionUi/issues/1606")
+        self.assertEqual(updated["events"][-1]["extra"]["detection_method"], "github_api_recent_exact_title")
+
+    def test_extract_uploaded_attachment_markdown_keeps_all_completed_lines(self):
+        before = "原始说明"
+        after = "\n".join(
+            [
+                "原始说明",
+                "![a](https://github.com/user-attachments/assets/a)",
+                "<!-- Uploading \"b.png\" -->",
+                "![b](https://github.com/user-attachments/assets/b)",
+                "![c](https://github.com/user-attachments/assets/c)",
+            ]
+        )
+
+        markdown = submit_mod._extract_uploaded_attachment_markdown(before, after)
+
+        self.assertEqual(
+            markdown,
+            "\n".join(
+                [
+                    "![a](https://github.com/user-attachments/assets/a)",
+                    "![b](https://github.com/user-attachments/assets/b)",
+                    "![c](https://github.com/user-attachments/assets/c)",
+                ]
+            ),
+        )
+
+    def test_skill_prepare_attachments_detects_partial_multi_upload_and_falls_back(self):
+        work_order = self.make_work_order(
+            "bug",
+            "wo-partial-upload-001",
+            with_attachment=True,
+            attachment_names=["1.png", "2.png", "3.png", "4.png"],
+        )
+        updated, controls = self.run_submit(
+            work_order,
+            args=["--no-submit"],
+            upload_markdown="![1](https://github.com/user-attachments/assets/only-one)",
+        )
+
+        self.assertEqual(updated["attachment_upload_status"], "upload_failed")
+        self.assertEqual(updated["attachment_markdown"], "")
+        self.assertIn("user-attachments/assets/only-one", controls["Additional Context"].value)
+        self.assertIn("`1.png`", controls["Additional Context"].value)
+        self.assertIn("`4.png`", controls["Additional Context"].value)
+
+    def test_ensure_work_order_attachments_discovers_workspace_images_only_from_allowed_dirs(self):
+        work_order = self.make_work_order("bug", "wo-discover-001")
+        workspace = self.workspace_dir_for(work_order)
+        (workspace / "root.png").write_bytes(self.png_bytes())
+        nested = workspace / "nested"
+        nested.mkdir()
+        (nested / "two.jpg").write_bytes(self.png_bytes())
+        ignored = workspace / "artifacts"
+        ignored.mkdir(exist_ok=True)
+        (ignored / "debug.png").write_bytes(self.png_bytes())
+
+        updated = support_mod.ensure_work_order_attachments(work_order)
+
+        self.assertEqual(updated["attachments"], ["root.png", "nested/two.jpg"])
+
+    def test_github_payload_builder_augments_work_order_attachments_before_payload(self):
+        work_order = self.make_work_order("bug", "wo-discover-gh-001")
+        workspace = self.workspace_dir_for(work_order)
+        (workspace / "1.png").write_bytes(self.png_bytes())
+        (workspace / "2.jpeg").write_bytes(self.png_bytes())
+        screenshots = workspace / "screens"
+        screenshots.mkdir()
+        (screenshots / "3.webp").write_bytes(self.png_bytes())
+
+        payload = self.run_github_payload(work_order)
+        updated = load_json(work_order)
+
+        self.assertIn("1.png", updated["attachments"])
+        self.assertIn("2.jpeg", updated["attachments"])
+        self.assertIn("screens/3.webp", updated["attachments"])
+        self.assertIn("1.png", payload["body"])
+        self.assertIn("screens/3.webp", payload["body"])
+
+    def test_recent_issue_lookup_matches_exact_title_and_recency(self):
+        payload = [
+            {
+                "number": 1400,
+                "title": "别的标题",
+                "html_url": "https://github.com/iOfficeAI/AionUi/issues/1400",
+                "created_at": "2026-03-20T17:14:30Z",
+            },
+            {
+                "number": 1605,
+                "title": "【Bug】发送按钮点击后卡死 / [Bug] Freeze after Send",
+                "html_url": "https://github.com/iOfficeAI/AionUi/issues/1605",
+                "created_at": "2026-03-20T17:14:12Z",
+            },
+        ]
+        response = mock.MagicMock()
+        response.read.return_value = json.dumps(payload).encode("utf-8")
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+
+        with mock.patch.object(submit_mod.urllib.request, "urlopen", return_value=response):
+            result = submit_mod.find_recent_issue_by_title(
+                "iOfficeAI/AionUi",
+                "【Bug】发送按钮点击后卡死 / [Bug] Freeze after Send",
+                project_url="https://github.com/iOfficeAI/AionUi",
+                not_before=datetime.datetime(2026, 3, 20, 17, 13, 30, tzinfo=datetime.timezone.utc),
+                timeout_sec=10,
+            )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.issue_number, "1605")
+        self.assertEqual(result.detection_method, "github_api_recent_exact_title")
 
     def test_skill_failure_records_structured_error(self):
         work_order = self.make_work_order("bug", "wo-timeout-001")
